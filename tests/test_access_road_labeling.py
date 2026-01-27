@@ -86,12 +86,11 @@ def test_road_paint_and_constraints(tool, tmp_path):
 
 
 def test_shortcuts_toggle_and_escape(tool):
-    # 'm' toggle was removed; pressing 'm' should not change manual_mode or splitting selection
+    # 'm' toggle was removed; pressing 'm' should be ignored (click a segment to split instead)
     from types import SimpleNamespace
-    prev = tool.manual_mode
     tool._on_key_press(SimpleNamespace(key='m'))
-    assert tool.manual_mode == prev
     assert getattr(tool, 'splitting_segment_id', None) is None
+    assert tool.manual_polylines == []
 
     # 'b' toggles boundary access mode
     assert not tool.boundary_access_mode
@@ -107,8 +106,7 @@ def test_shortcuts_toggle_and_escape(tool):
     tool._on_key_press(SimpleNamespace(key='r'))
     assert not tool.road_mode_active
 
-    # Escape in manual mode clears selection and in-progress lines
-    tool._toggle_manual_mode()
+    # Escape clears in-progress split selection and lines
     tool.splitting_segment_id = 5
     tool.manual_polylines.append([(10,10),(20,20)])
     tool._on_key_press(SimpleNamespace(key='escape'))

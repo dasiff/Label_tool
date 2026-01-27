@@ -169,8 +169,8 @@ class LabelingTool:
         self.dragging_vertex: bool = False  # kept for compatibility (unused)
         self.dragging_vertex_idx: Optional[int] = None  # kept for compatibility (unused) 
         
-        # Manual segmentation mode (DEPRECATED): prefer `splitting_segment_id` for transient split selection
-        self.manual_mode: bool = False
+        # Manual segmentation legacy flag removed; use `splitting_segment_id` (None when no split selected)
+        # (removed `manual_mode` to avoid confusing persistent toggle semantics)
         self.manual_line_points: List[Tuple[int, int]] = []  # Current polyline being drawn
         self.manual_polylines: List[List[Tuple[int, int]]] = []  # List of completed polylines
         self.manual_line_artists = []  # Artists for all polylines
@@ -1452,21 +1452,6 @@ class LabelingTool:
             self.ax.set_title("Click segment to label (right-click to remove)")
             self.canvas.draw()
     
-    def _toggle_manual_mode(self):
-        """Deprecated: explicit manual-toggle removed. Manual split selection now occurs by clicking a segment in Segments mode.
-        This function is retained as a no-op for backward compatibility with older shortcuts/tests."""
-        try:
-            # Deprecated: explicit manual-toggle removed. Ensure finalize button disabled when not selecting
-            try:
-                self.finalize_btn.config(state=tk.DISABLED)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        try:
-            self.canvas.draw()
-        except Exception:
-            pass
     
     def _clear_manual_line(self):
         """Clear manual line points and artists."""
@@ -2841,9 +2826,8 @@ class LabelingTool:
         # --- Global shortcuts (work when boundary exists) ---
         key = event.key.lower() if event.key else None
         if key in ('m','b','r','n','p','s','escape'):
-            # Toggle split/manual mode
+            # 'm' toggle removed: split selection is click-to-select (ignored)
             if key == 'm' and self.boundary_approved:
-                self._toggle_manual_mode()
                 return
             # Toggle boundary access
             if key == 'b' and self.boundary_approved:

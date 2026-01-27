@@ -21,7 +21,7 @@ Core state (important variables):
 - Image/I-O: `images_folder`, `output_folder`, `image_files`, `current_idx`.
 - Image/boundary: `current_image`, `clean_image`, `original_boundary`, `current_boundary`, transform (`boundary_dx/dy/theta`).
 - Segmentation/labels: `segments` (np.ndarray of per-pixel segment ids), `n_segments`, `target_segments`, `segment_labels` (dict mapping id->class), `min_segment_px`.
-- Manual editing: `manual_mode`, `manual_polylines`, `manual_line_points`, `splitting_segment_id`, `split_history`.
+- Manual editing: `manual_polylines`, `manual_line_points`, `splitting_segment_id`, `split_history` (note: legacy `manual_mode` and `_toggle_manual_mode` removed; segment selection is click-to-select + Apply)
 - Buffers/roads: `buffer_mask`, `road_mask`.
 - Flags: `boundary_approved`, `has_unsaved_changes`.
 
