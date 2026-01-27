@@ -34,7 +34,11 @@ def apply_manual_split(self):
     self.split_history.append(self.segments.copy())
     if len(self.split_history) > 10:  # Limit history to last 10 splits
         self.split_history.pop(0)
-    self.undo_split_btn.config(state=tk.NORMAL)
+    try:
+        # Use string state to avoid referencing tkinter symbol in this module
+        self.undo_split_btn.config(state='normal')
+    except Exception:
+        pass
     
     h, w = self.segments.shape
     print(f"\n=== MANUAL SPLIT DEBUG ===")
@@ -350,7 +354,7 @@ def apply_manual_split(self):
                             continue
                         if not (seg_mask[sA[1], sA[0]] and seg_mask[sB[1], sB[0]]):
                             continue
-[...] (truncated)
+
 
 
 # --- Endpoint snapping helpers (extracted from scripts/labeling_tool.py) ---

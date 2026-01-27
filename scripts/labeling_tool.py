@@ -216,6 +216,13 @@ class LabelingTool:
             self.shadow_robust_var = SimpleNamespace(get=lambda: False)
             self.pre_smooth_var = SimpleNamespace(get=lambda: False)
             self.auto_merge_var = SimpleNamespace(get=lambda: False)
+            # Minimal UI placeholders used by headless tests
+            self.manual_status = SimpleNamespace(config=lambda *a, **k: None)
+            self.manual_btn = SimpleNamespace(config=lambda *a, **k: None)
+            self.finalize_btn = SimpleNamespace(config=lambda *a, **k: None)
+            self.undo_split_btn = SimpleNamespace(config=lambda *a, **k: None)
+            self.submit_btn = SimpleNamespace(config=lambda *a, **k: None)
+            self.boundary_status = SimpleNamespace(config=lambda *a, **k: None)
             # Do not attempt to auto-load preferences in headless mode
         
     def _build_ui(self):
