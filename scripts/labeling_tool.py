@@ -605,11 +605,16 @@ class LabelingTool:
             def _toggle_floating_save():
                 try:
                     if getattr(self, 'floating_save_visible', False):
-                                    if self.floating_save_btn is not None and self.floating_save_visible:
-                            self.floating_save_btn.place_forget()
+                        # Hide the floating button if currently visible
+                        if self.floating_save_btn is not None and self.floating_save_visible:
+                            try:
+                                self.floating_save_btn.place_forget()
+                            except Exception:
+                                pass
                         self.floating_save_visible = False
                         self.quick_floating_toggle.config(text='☆')
                     else:
+                        # Show the floating button if currently hidden
                         if self.floating_save_btn is not None and not self.floating_save_visible:
                             self.floating_save_btn.place(relx=0.98, rely=0.02, anchor='ne')
                         self.floating_save_visible = True
