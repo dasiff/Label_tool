@@ -1215,9 +1215,9 @@ class LabelingTool:
                 # Segments exist - ensure they are displayed and the Label button is available
                 try:
                     self._update_display()
-                    # Enable label button so user can switch easily to Label mode
+                    # Refresh mode UI to ensure buttons reflect current state
                     try:
-                        self.mode_buttons['label'].config(state=tk.NORMAL)
+                        self._set_mode(self.mode)
                     except Exception:
                         pass
                 except Exception:
@@ -1434,102 +1434,10 @@ class LabelingTool:
         """Thin wrapper delegating to `labeling.ui._update_title_for_mode`."""
         return ui_core._update_title_for_mode(self)
 
-    def _set_mode(self, mk: str):
-        """Set the current UI mode and update visibility/state consistently.
-        This overrides any fragile previous implementations and ensures tests (and UX)
-        get deterministic behavior when switching modes.
-        """
-        try:
-            self.mode = mk
-        except Exception:
-            pass
-        # Update button visuals
-        try:
-            for k, b in getattr(self, 'mode_buttons', {}).items():
-                try:
-                    if k == mk:
-                        b.config(relief=tk.SUNKEN, bg='#D3D3D3')
-                    else:
-                        b.config(relief=tk.RAISED, bg='#f0f0f0')
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # Show/hide section frames (use labels registered in self.section_frames where possible)
-        try:
-            for name, (frame, btn) in getattr(self, 'section_frames', {}).items():
-                try:
-                    frame.pack_forget()
-                except Exception:
-                    pass
-            # Conservative show sets based on mode
-            if mk == 'boundary':
-                try:
-                    self.boundary_tools_frame.pack(pady=1, fill='x')
-                except Exception:
-                    pass
-            elif mk == 'segments':
-                # Ensure segments, class and access sections are visible
-                for nstarts in ('4. Segments', '5. Class', '6. Access'):
-                    for n, (f, _) in self.section_frames.items():
-                        if n.startswith(nstarts):
-                            try:
-                                f.pack(pady=1, fill='x')
-                            except Exception:
-                                pass
-                # Enable/disable label button depending on whether segments are present
-                try:
-                    if getattr(self, 'segments', None) is not None:
-                        self.mode_buttons['label'].config(state=tk.NORMAL)
-                    else:
-                        self.mode_buttons['label'].config(state=tk.DISABLED)
-                except Exception:
-                    pass
-            elif mk == 'label':
-                for nstarts in ('5. Class', '6. Access'):
-                    for n, (f, _) in self.section_frames.items():
-                        if n.startswith(nstarts):
-                            try:
-                                f.pack(pady=1, fill='x')
-                            except Exception:
-                                pass
-                try:
-                    self.mode_buttons['label'].config(state=tk.NORMAL)
-                except Exception:
-                    pass
-            elif mk == 'access':
-                for n, (f, _) in self.section_frames.items():
-                    if n.startswith('6. Access'):
-                        try:
-                            f.pack(pady=1, fill='x')
-                        except Exception:
-                            pass
-            else:
-                # fallback: show boundary tools by default
-                try:
-                    self.boundary_tools_frame.pack(pady=1, fill='x')
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # Update title and redraw
-        try:
-            self._update_title_for_mode()
-        except Exception:
-            pass
-        try:
-            self.canvas.draw()
-        except Exception:
-            pass
-        # Enforce label button disabled state for segments mode (defensive)
-        try:
-            if getattr(self, 'mode', None) == 'segments':
-                self.mode_buttons['label'].config(state=tk.DISABLED)
-            else:
-                self.mode_buttons['label'].config(state=tk.NORMAL)
-        except Exception:
-            pass
-    
+    # NOTE: earlier `_set_mode` implementation was removed to eliminate duplicates.
+    # The canonical `_set_mode` is defined later in this file and centralizes all UI visibility
+    # and button state updates. Please see the `_set_mode` implementation further down.
+
     def _on_class_selected(self):
         """Called when user selects a class - auto-switch to labeling mode."""
         # Auto-approve boundary if not already approved but boundary exists
@@ -3669,9 +3577,12 @@ class LabelingTool:
                 content.pack(pady=1, fill='x')
                 btn.config(text='▾')
             self.mode_buttons['segments'].config(bg='#90EE90')
-            # Keep Label button disabled while in segments mode (avoids accidental mode switch)
+            # Make Label button available if segments exist (allow user to switch to Label mode)
             try:
-                self.mode_buttons['label'].config(state=tk.DISABLED)
+                if getattr(self, 'segments', None) is not None:
+                    self.mode_buttons['label'].config(state=tk.NORMAL)
+                else:
+                    self.mode_buttons['label'].config(state=tk.DISABLED)
             except Exception:
                 pass
             # Also show class selection and ensure submit stays in footer (visible at bottom)
