@@ -33,6 +33,9 @@ import labeling.core.segment as segment_core
 import labeling.core.boundary_utils as boundary_utils_core
 import labeling.render as render_core
 import labeling.core.manual_split as manual_split_core
+import labeling.workers as workers_core
+import labeling.persistence as persistence_core
+import labeling.ui as ui_core
 from app.core.boundary import estimate_boundary_from_overlay
 
 
@@ -917,9 +920,38 @@ class LabelingTool:
                 if segments_file.exists():
                     try:
                         self.segments = np.load(str(segments_file))
-                        self.n_segments = self.segments.max()
+                        # Ensure buffer mask computed and mask out anything outside ROI+buffer
+                        try:
+                            self._compute_buffer_mask()
+                            h, w = self.clean_image.shape[:2]
+                            roi_mask_full = np.zeros((h, w), dtype=np.uint8)
+                            cv2.fillPoly(roi_mask_full, [self.current_boundary.astype(np.int32)], 255)
+                            roi_mask_bool = (roi_mask_full > 0)
+                            buffer_mask_full = self.buffer_mask.astype(bool) if getattr(self, 'buffer_mask', None) is not None else np.zeros((h, w), dtype=bool)
+                            roi_expanded = roi_mask_bool | buffer_mask_full
+                            # Exclude the 1-px boundary itself (enforce hard split)
+                            edge_mask_full = np.zeros((h, w), dtype=np.uint8)
+                            cv2.polylines(edge_mask_full, [self.current_boundary.astype(np.int32)], isClosed=True, color=255, thickness=1)
+                            edge_mask_full = edge_mask_full > 0
+                            roi_expanded[edge_mask_full] = False
+                            # Zero-out segments outside expanded ROI
+                            self.segments[np.logical_not(roi_expanded)] = 0
+                            # Compact segment ids to 1..N
+                            unique_ids = np.unique(self.segments)
+                            unique_ids = unique_ids[unique_ids > 0]
+                            new_seg = np.zeros_like(self.segments)
+                            nid = 1
+                            for uid in unique_ids:
+                                new_seg[self.segments == uid] = nid
+                                nid += 1
+                            self.segments = new_seg
+                            self.n_segments = int(self.segments.max())
+                        except Exception:
+                            # If masking fails for any reason, still fall back to using loaded segments
+                            pass
+
                         self.target_segments = self.n_segments
-                        print(f"Loaded saved segments: {self.n_segments} segments")
+                        print(f"Loaded saved segments: {self.n_segments} segments (masked to ROI+buffer)")
                     except Exception as e:
                         print(f"Error loading segments: {e}")
                         # Fallback to regenerating
@@ -965,7 +997,11 @@ class LabelingTool:
                 self.has_unsaved_changes = False
                 self.submit_btn.config(text="✓ Saved!", bg='#90EE90')
                 
-                print("Calling _update_display() for previously labeled image")
+                print("Calling _mask_segments_to_roi() and _update_display() for previously labeled image")
+                try:
+                    self._mask_segments_to_roi()
+                except Exception:
+                    pass
                 self._update_display()
                 self._update_progress()
                 print("Display updated for previously labeled image")
@@ -1284,34 +1320,8 @@ class LabelingTool:
         self._generate_segments()
     
     def _update_title_for_mode(self):
-        """Update title based on current mode."""
-        # Mode selection has priority: ensure title reflects the actively selected mode
-        try:
-            if getattr(self, 'mode', None) == 'boundary':
-                self.ax.set_title("Adjust boundary (drag corners to reshape, arrows=move, </>=rotate)")
-            elif getattr(self, 'mode', None) == 'segments':
-                if getattr(self, 'manual_mode', False):
-                    self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
-                else:
-                    self.ax.set_title("SEGMENT MODE: Label, split, refine segments")
-            elif getattr(self, 'mode', None) == 'label':
-                self.ax.set_title("LABEL MODE: Click segment to label (right-click to remove)")
-            elif getattr(self, 'mode', None) == 'access':
-                self.ax.set_title("ACCESS MODE: Boundary access and road painting (use buttons to enable)")
-            else:
-                # Fallback to boundary-aware title
-                if not self.boundary_approved:
-                    self.ax.set_title("Adjust boundary (drag corners to reshape, arrows=move, </>=rotate)")
-                elif self.manual_mode:
-                    self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
-                else:
-                    self.ax.set_title("LABEL MODE: Click segment to label (right-click to remove)")
-        except Exception:
-            pass
-        try:
-            self.canvas.draw()
-        except Exception:
-            pass
+        """Thin wrapper delegating to `labeling.ui._update_title_for_mode`."""
+        return ui_core._update_title_for_mode(self)
 
     def _set_mode(self, mk: str):
         """Set the current UI mode and update visibility/state consistently.
@@ -1430,13 +1440,19 @@ class LabelingTool:
             # SPLIT mode active
             self.manual_btn.config(text="Split Mode (On)", bg='#90EE90', relief=tk.RAISED, font=("Arial", 8, "bold"))
             self.finalize_btn.config(state=tk.NORMAL)
-            self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
+            try:
+                self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
+            except Exception:
+                pass
             self.manual_status.config(text="Click a segment to select it for splitting")
         else:
             # SPLIT mode inactive
             self.manual_btn.config(text="Split Mode (Off)", bg='#FFD700', relief=tk.RAISED, font=("Arial", 8, "bold"))
             self.finalize_btn.config(state=tk.DISABLED)
-            self.ax.set_title("Adjust boundary (arrows=move, </>=rotate) and press Enter to proceed" if not self.boundary_approved else "LABEL MODE: Click segment to label (right-click to remove)")
+            try:
+                self.ax.set_title("Adjust boundary (arrows=move, </>=rotate) and press Enter to proceed" if not self.boundary_approved else "LABEL MODE: Click segment to label (right-click to remove)")
+            except Exception:
+                pass
             self.manual_status.config(text="")
             self._clear_manual_line()
             self.splitting_segment_id = None  # Reset highlighted segment
@@ -1604,139 +1620,31 @@ class LabelingTool:
         return result
 
     def _apply_manual_split_background_safe(self):
-        """Background-safe split handler for common closed-loop polygons.
-        If closed-loop polygons are detected in the manual polylines, handle them quickly
-        in a background thread and schedule final UI updates on the main thread. For
-        non-closed line splits we fall back to performing the full split on the main
-        thread (to keep GUI actions safe).
+        """Thin wrapper delegating to the implementation in `labeling.workers`.
+
+        The original implementation was moved verbatim to `labeling.workers.apply_manual_split_background_safe`.
         """
-        self._running_in_background = True
-        try:
-            manual_polylines = [p.copy() for p in getattr(self, 'manual_polylines', [])]
-            if len(manual_polylines) == 0 or self.segments is None:
-                try:
-                    self.root.after(0, lambda: self.manual_status.config(text="No lines to apply"))
-                except Exception:
-                    pass
-                self._running_in_background = False
-                return
-
-            segs_local = self.segments.copy()
-            seg_id = self.splitting_segment_id
-            seg_mask = (segs_local == seg_id)
-            seg_area = int(seg_mask.sum())
-            h, w = segs_local.shape
-            if seg_area == 0:
-                try:
-                    self.root.after(0, lambda: self.manual_status.config(text="Selected segment empty"))
-                except Exception:
-                    pass
-                self._running_in_background = False
-                return
-
-            # compute edge coords for this segment
-            seg_uint8 = seg_mask.astype(np.uint8)
-            kernel = np.ones((3, 3), np.uint8)
-            eroded = cv2.erode(seg_uint8, kernel, iterations=1)
-            edge_mask = seg_uint8 - eroded
-            edge_coords = np.argwhere(edge_mask > 0)
-            if edge_coords.size == 0:
-                try:
-                    contours, _ = cv2.findContours((seg_uint8 * 255).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                    if contours:
-                        c = max(contours, key=lambda x: cv2.contourArea(x))
-                        edge_coords = np.array([[pt[0][1], pt[0][0]] for pt in c.reshape(-1,1,2)])
-                except Exception:
-                    edge_coords = np.empty((0,2), dtype=int)
-
-            segments_added_local = 0
-            new_segment_selected = None
-
-            # quick path: handle closed polygons only
-            for manual_line_points in manual_polylines:
-                pts = np.array(manual_line_points, dtype=np.int32)
-                if pts.shape[0] < 3:
-                    continue
-                p0 = pts[0]; p_last = pts[-1]
-                dist_endpoints = np.linalg.norm(np.array([p0[1], p0[0]]) - np.array([p_last[1], p_last[0]]))
-                if edge_coords.size == 0:
-                    continue
-                dist_to_edges_0 = np.linalg.norm(edge_coords - np.array([p0[1], p0[0]]), axis=1)
-                nearest_edge_dist_0 = dist_to_edges_0.min()
-                dist_to_edges_last = np.linalg.norm(edge_coords - np.array([p_last[1], p_last[0]]), axis=1)
-                nearest_edge_dist_last = dist_to_edges_last.min()
-                is_closed_loop = (dist_endpoints < nearest_edge_dist_0 and dist_endpoints < nearest_edge_dist_last)
-                if not is_closed_loop:
-                    # Not a closed polygon; fallback to main-thread full split
-                    try:
-                        self.root.after(0, lambda: self._apply_manual_split())
-                    except Exception:
-                        pass
-                    self._running_in_background = False
-                    return
-
-                # closed polygon: fill and assign if large enough
-                poly_pts = pts.astype(np.int32)
-                poly_mask_local = np.zeros((h, w), dtype=np.uint8)
-                try:
-                    cv2.fillPoly(poly_mask_local, [poly_pts], 255)
-                except Exception:
-                    continue
-                constrained_poly = (poly_mask_local > 0) & seg_mask
-                area_poly = int(constrained_poly.sum())
-                poly_min = max(100, int(seg_area * 0.01))
-                if area_poly >= poly_min:
-                    new_seg_id_local = int(segs_local.max()) + 1
-                    segs_local[constrained_poly] = new_seg_id_local
-                    segments_added_local += 1
-                    new_segment_selected = new_seg_id_local
-
-            # Finalize on main thread if any closed-loop handled
-            if segments_added_local > 0:
-                def ui_finalize():
-                    try:
-                        self.segments = segs_local
-                        old_n = self.n_segments
-                        self.n_segments = int(self.segments.max())
-                        print(f"\nSegment count: {old_n} -> {self.n_segments} (added {segments_added_local})")
-                        self.manual_status.config(text="Split applied! Draw another or toggle off")
-                        try:
-                            self.finalize_btn.config(state=tk.NORMAL)
-                            self.manual_btn.config(state=tk.NORMAL)
-                        except Exception:
-                            pass
-                        if new_segment_selected is not None:
-                            self.splitting_segment_id = int(new_segment_selected)
-                            try:
-                                self._update_display_with_highlight(self.splitting_segment_id)
-                            except Exception:
-                                pass
-                        else:
-                            self.splitting_segment_id = None
-                        self._clear_manual_line()
-                        self._reset_submit_button()
-                        self._update_display()
-                        self._update_progress()
-                    except Exception as e:
-                        print("Error finalizing background split:", e)
-                try:
-                    self.root.after(0, ui_finalize)
-                except Exception:
-                    ui_finalize()
-            else:
-                # Nothing created; report to user
-                try:
-                    self.root.after(0, lambda: self.manual_status.config(text="Split did not create any region"))
-                except Exception:
-                    pass
-        finally:
-            self._running_in_background = False
+        return workers_core.apply_manual_split_background_safe(self)
 
     def _apply_manual_split(self):
         """Thin wrapper calling implementation moved to labeling.core.manual_split.apply_manual_split
         (implementation was copied verbatim into that module as part of the atomic move).
         """
-        return manual_split_core.apply_manual_split(self)
+        # Call the pure-core implementation; then ensure selection preserved when split occurred
+        old_n = int(self.n_segments) if getattr(self, 'n_segments', None) is not None else (int(self.segments.max()) if self.segments is not None else 0)
+        manual_split_core.apply_manual_split(self)
+        try:
+            new_n = int(self.segments.max()) if self.segments is not None else old_n
+            if new_n > old_n and getattr(self, 'splitting_segment_id', None) is None:
+                # Default to selecting the last-created segment
+                self.splitting_segment_id = int(self.segments.max())
+                try:
+                    self._update_display_with_highlight(self.splitting_segment_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return
         
         # Check if user selected a segment to split
         if not hasattr(self, 'splitting_segment_id') or self.splitting_segment_id is None:
@@ -2379,6 +2287,52 @@ class LabelingTool:
             self._update_display()
         except Exception:
             pass    
+    def _mask_segments_to_roi(self):
+        """Zero out any segments outside the property boundary + buffer and compact labels.
+        Ensures loaded segments respect current boundary and buffer settings.
+        """
+        if self.segments is None or self.current_boundary is None:
+            return
+        h, w = self.segments.shape
+        try:
+            self._compute_buffer_mask()
+        except Exception:
+            pass
+        roi_mask_full = np.zeros((h, w), dtype=np.uint8)
+        try:
+            cv2.fillPoly(roi_mask_full, [self.current_boundary.astype(np.int32)], 255)
+        except Exception:
+            pass
+        roi_mask_bool = (roi_mask_full > 0)
+        buffer_mask_full = self.buffer_mask.astype(bool) if getattr(self, 'buffer_mask', None) is not None else np.zeros((h, w), dtype=bool)
+        roi_expanded = roi_mask_bool | buffer_mask_full
+        # Exclude boundary edge pixels for hard split
+        edge_mask_full = np.zeros((h, w), dtype=np.uint8)
+        try:
+            cv2.polylines(edge_mask_full, [self.current_boundary.astype(np.int32)], isClosed=True, color=255, thickness=1)
+        except Exception:
+            pass
+        edge_mask_full = edge_mask_full > 0
+        roi_expanded[edge_mask_full] = False
+        # Zero-out segments outside expanded ROI
+        try:
+            self.segments[np.logical_not(roi_expanded)] = 0
+        except Exception:
+            pass
+        # Compact positive labels to 1..N
+        try:
+            unique_ids = np.unique(self.segments)
+            unique_ids = unique_ids[unique_ids > 0]
+            new_seg = np.zeros_like(self.segments)
+            nid = 1
+            for uid in unique_ids:
+                new_seg[self.segments == uid] = nid
+                nid += 1
+            self.segments = new_seg
+            self.n_segments = int(self.segments.max())
+        except Exception:
+            pass
+
     def _toggle_road_mode(self):
         """Toggle the (legacy) road painting mode. Kept for backward compatibility with tests.
         This will toggle an internal flag and update the manual status. Actual painting occurs
@@ -2490,58 +2444,8 @@ class LabelingTool:
         return render_core._draw_access_segments(self)
 
     def _update_boundary_artists(self):
-        """Fast update of existing boundary polygon only (vertex handles removed).
-        If the polygon artist doesn't exist yet, create it via _draw_editable_boundary().
-        """
-        # If blit is available, try to blit the polygon update only
-        if getattr(self, '_use_blit', False) and getattr(self, '_bg', None) is not None and getattr(self, '_renderer', None) is not None:
-            try:
-                self.canvas.restore_region(self._bg)
-                try:
-                    self._boundary_poly_artist.set_xy(self.current_boundary)
-                except Exception:
-                    try:
-                        self._boundary_poly_artist.remove()
-                    except Exception:
-                        pass
-                    self._boundary_poly_artist = mpatches.Polygon(self.current_boundary, fill=False, edgecolor='yellow', linewidth=1)
-                    self.ax.add_patch(self._boundary_poly_artist)
-                try:
-                    self._boundary_poly_artist.draw(self._renderer)
-                except Exception:
-                    pass
-                try:
-                    self.canvas.blit(self.ax.bbox)
-                except Exception:
-                    self.canvas.draw_idle()
-                return
-            except Exception:
-                # Fall through to non-blit update
-                pass
-
-        # Non-blit update: update or recreate polygon artist and schedule a coalesced draw
-        try:
-            self._boundary_poly_artist.set_xy(self.current_boundary)
-        except Exception:
-            try:
-                self._boundary_poly_artist.remove()
-            except Exception:
-                pass
-            self._boundary_poly_artist = mpatches.Polygon(self.current_boundary, fill=False, edgecolor='yellow', linewidth=1)
-            self.ax.add_patch(self._boundary_poly_artist)
-        # Use coalesced draw to avoid frequent heavy GUI redraws
-        try:
-            if self._profile_drag:
-                t_draw0 = time.time()
-            self._schedule_coalesced_draw()
-            if self._profile_drag:
-                t_draw1 = time.time(); print(f"PROFILE: schedule_draw {t_draw1-t_draw0:.4f}s")
-        except Exception:
-            if self._profile_drag:
-                t_draw0 = time.time()
-            self.canvas.draw()
-            if self._profile_drag:
-                t_draw1 = time.time(); print(f"PROFILE: canvas_draw {t_draw1-t_draw0:.4f}s")
+        """Thin wrapper delegating to `labeling.ui._update_boundary_artists`."""
+        return ui_core._update_boundary_artists(self)
 
     def _compute_buffer_mask(self):
         """Thin wrapper calling implementation moved to labeling.core.boundary_utils._compute_buffer_mask
@@ -3144,17 +3048,31 @@ class LabelingTool:
         
         self.ax.clear()
         self.ax.imshow(display, extent=[0, w, h, 0], aspect='equal')
-        
+
         # Add boundary
         if self.current_boundary is not None:
             poly = mpatches.Polygon(self.current_boundary, fill=False,
                                    edgecolor='yellow', linewidth=1.5, joinstyle='round')
-            self.ax.add_patch(poly)
-        
-        # Draw all manual polylines
-        # Draw completed polylines in green
-        for polyline in self.manual_polylines:
-            points = np.array(polyline)
+            try:
+                self.ax.add_patch(poly)
+            except Exception:
+                pass
+
+        # Draw buffer overlay on highlight view if present
+        try:
+            if getattr(self, 'buffer_mask', None) is not None and self.buffer_mask.sum() > 0:
+                buf = self.buffer_mask.astype(float)
+                overlay = np.zeros((h, w, 4), dtype=float)
+                overlay[..., 0] = 1.0
+                overlay[..., 1] = 0.85
+                overlay[..., 2] = 0.0
+                overlay[..., 3] = 0.18 * buf
+                try:
+                    self.ax.imshow(overlay, extent=[0, w, h, 0], aspect='equal', origin='upper')
+                except Exception:
+                    pass
+        except Exception:
+            pass
             artist, = self.ax.plot(points[:, 0], points[:, 1], 'g-', linewidth=2, marker='o', markersize=4)
             self.manual_line_artists.append(artist)
         
@@ -3259,181 +3177,8 @@ class LabelingTool:
         return unlabeled_ids
     
     def _save_draft(self):
-        """Save a draft of the current work (non-destructive). Runs in a separate thread to avoid blocking the UI."""
-        def _worker():
-            try:
-                try:
-                    print("DEBUG _save_draft worker start")
-                except Exception:
-                    pass
-                drafts_dir = (Path.cwd() / 'data' / 'drafts').resolve()
-                drafts_dir.mkdir(parents=True, exist_ok=True)
-                # Choose image name if available
-                if getattr(self, 'image_files', None) and len(self.image_files) > 0:
-                    image_name = self.image_files[self.current_idx].stem
-                else:
-                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    image_name = f'draft_{ts}'
-                base = drafts_dir / image_name
-                # Ensure parent exists
-                base.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    # Diagnostics for unexpected write failures
-                    print(f"DEBUG draft dir: {base.parent.resolve()}, exists={base.parent.exists()}")
-                except Exception:
-                    pass
-                # Save segments
-                if self.segments is not None:
-                    seg_path = base.with_name(base.name + '_segments.npy')
-                    # Ensure parent exists (defensive)
-                    try:
-                        seg_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(seg_path, 'wb') as _f:
-                            pass
-                    except Exception:
-                        pass
-                    try:
-                        # Diagnostics
-                        try:
-                            print(f"DEBUG seg_path: {seg_path}, parent_exists={seg_path.parent.exists()}")
-                        except Exception:
-                            pass
-                        # Write to a temp file and atomically replace to avoid file locking races on Windows
-                        # Ensure parent directory exists (retry a few times to mitigate transient OS races on Windows)
-                        for _i in range(3):
-                            try:
-                                seg_path.parent.mkdir(parents=True, exist_ok=True)
-                                break
-                            except Exception:
-                                time.sleep(0.01)
-                        if not seg_path.parent.exists():
-                            # If, for some reason, the direct parent doesn't exist (transient), fallback to drafts_dir
-                            try:
-                                print(f"WARNING: seg_path.parent missing ({seg_path.parent}) - falling back to drafts_dir {drafts_dir}")
-                            except Exception:
-                                pass
-                            tmp_dir = drafts_dir
-                        else:
-                            tmp_dir = seg_path.parent
-                        # Create an atomic temporary filename under the determined tmp_dir
-                        import uuid
-                        tmp_name = tmp_dir / (seg_path.name + f'.tmp.{uuid.uuid4().hex}.npy')
-                        np.save(str(tmp_name), self.segments)
-                        try:
-                            os.replace(str(tmp_name), str(seg_path))
-                            try:
-                                print(f"DEBUG saved segments -> {seg_path}")
-                            except Exception:
-                                pass
-                        except Exception:
-                            # fallback to copy
-                            try:
-                                shutil.copy2(str(tmp_name), str(seg_path))
-                                try:
-                                    print(f"DEBUG copied segments -> {seg_path}")
-                                except Exception:
-                                    pass
-                            finally:
-                                try:
-                                    os.unlink(str(tmp_name))
-                                except Exception:
-                                    pass
-                    except Exception as _e:
-                        import traceback as _tb
-                        print('Failed saving segments to:', repr(str(seg_path)))
-                        print(_tb.format_exc())
-                        raise
-                    seg_file = seg_path
-                else:
-                    seg_file = None
-                # Build metadata
-                data = {
-                    'image_name': image_name,
-                    'timestamp': datetime.now().isoformat(),
-                    'boundary_polygon_px': [[float(x), float(y)] for x, y in self.current_boundary] if getattr(self, 'current_boundary', None) is not None else None,
-                    'boundary_transform': {'dx': float(getattr(self, 'boundary_dx', 0.0)), 'dy': float(getattr(self, 'boundary_dy', 0.0)), 'theta_deg': float(getattr(self, 'boundary_theta', 0.0))},
-                    'segment_labels': {str(k): v for k, v in getattr(self, 'segment_labels', {}).items()},
-                    'manual_polylines': getattr(self, 'manual_polylines', []),
-                    'splitting_segment_id': int(getattr(self, 'splitting_segment_id', -1)) if getattr(self, 'splitting_segment_id', None) is not None else None,
-                    'min_segment_px': int(getattr(self, 'min_segment_px', 1000)),
-                    'target_segments': int(getattr(self, 'target_segments', 50)),
-                    'segments_file': seg_file.name if seg_file is not None else None,
-                    'note': 'draft',
-                }
-                json_path = base.with_name(base.name + '_draft.json')
-                try:
-                    # Write JSON atomically avoiding NamedTemporaryFile to reduce Windows race issues
-                    import uuid
-                    tmp_json = json_path.parent / (json_path.name + f'.tmp.{uuid.uuid4().hex}.json')
-                    with open(tmp_json, 'w', encoding='utf-8') as _tf:
-                        _tf.write(json.dumps(data, indent=2))
-                        try:
-                            _tf.flush()
-                            os.fsync(_tf.fileno())
-                        except Exception:
-                            pass
-                    try:
-                        os.replace(str(tmp_json), str(json_path))
-                        try:
-                            print(f"DEBUG saved json -> {json_path}")
-                        except Exception:
-                            pass
-                    except Exception:
-                        try:
-                            shutil.copy2(str(tmp_json), str(json_path))
-                            try:
-                                print(f"DEBUG copied json -> {json_path}")
-                            except Exception:
-                                pass
-                        finally:
-                            try:
-                                os.unlink(str(tmp_json))
-                            except Exception:
-                                pass
-                except Exception as e:
-                    import traceback as _tb
-                    print('Failed writing json_path:', repr(str(json_path)))
-                    print(_tb.format_exc())
-                    raise
-                # Optionally copy to output folder as well
-                if getattr(self, 'output_folder', None) is not None:
-                    try:
-                        dest = self.output_folder / json_path.name
-                        shutil.copy2(str(json_path), dest)
-                        if seg_file is not None:
-                            shutil.copy2(str(seg_file), str(self.output_folder / Path(seg_file).name))
-                    except Exception:
-                        pass
-                # Notify user on main thread
-                try:
-                    self.root.after(0, lambda: self.manual_status.config(text=f"Draft saved: {json_path.name}"))
-                    self.root.after(0, lambda: messagebox.showinfo('Draft saved', f"Draft saved: {json_path}"))
-                except Exception:
-                    pass
-                try:
-                    print("DEBUG drafts dir listing:", [p.name for p in drafts_dir.iterdir()])
-                except Exception:
-                    pass
-                try:
-                    print("DEBUG _save_draft worker done")
-                except Exception:
-                    pass
-            except Exception as e:
-                print('Error saving draft:', e)
-                try:
-                    self.root.after(0, lambda: messagebox.showerror('Draft save failed', str(e)))
-                except Exception:
-                    pass
-        # Kick off thread in GUI mode; run synchronously in headless/test mode
-        try:
-            if getattr(self, '_tk_available', False):
-                t = threading.Thread(target=_worker, daemon=True)
-                t.start()
-            else:
-                # Headless - run synchronously so tests can observe results
-                _worker()
-        except Exception:
-            _worker()
+        """Thin wrapper delegating to `labeling.persistence.save_draft`."""
+        return persistence_core.save_draft(self)
 
     def _submit_annotation(self):
         """Submit and save."""
@@ -3502,13 +3247,27 @@ class LabelingTool:
                 # Only visualize user-labeled segments
                 if seg_id in self.segment_labels:
                     class_name = self.segment_labels[seg_id]
-                # normalize known legacy class names
-                if class_name == 'parking_surface':
-                    class_name = 'parking_stalls'
-                if class_name == 'building_roof':
-                    class_name = 'building'
+                    # normalize known legacy class names
+                    if class_name == 'parking_surface':
+                        class_name = 'parking_stalls'
+                    if class_name == 'building_roof':
+                        class_name = 'building'
+                    color = CLASS_COLORS.get(class_name, [0.9, 0.9, 0.9])
+                    # Blend per-channel to avoid boolean-mask broadcasting issues
+                    for ch in range(3):
+                        chan = vis_img[:, :, ch]
+                        chan[seg_mask] = chan[seg_mask] * (1 - alpha) + color[ch] * alpha
+                        vis_img[:, :, ch] = chan
+                # unlabeled segments are skipped from visualization
+            # Draw white border on image edges for visibility (one pixel border)
+            h_vis, w_vis = vis_img.shape[:2]
+            all_edges = np.zeros((h_vis, w_vis), dtype=bool)
+            all_edges[0, :] = True
+            all_edges[-1, :] = True
+            all_edges[:, 0] = True
+            all_edges[:, -1] = True
             vis_img[all_edges] = [1, 1, 1]
-            
+
             # Draw boundary
             if self.current_boundary is not None:
                 boundary_int = self.current_boundary.astype(np.int32)
@@ -3636,24 +3395,36 @@ class LabelingTool:
                 'legend': {0:'ignore',1:'parking_or_road',2:'building_immobile',3:'vegetation'}
             }
 
-        with open(output_file, 'w') as f:
-            json.dump(data, f, indent=2)
-        
-        # Clear unsaved changes flag
-        self.has_unsaved_changes = False
-        
-        # Update submit button to show saved state
-        self.submit_btn.config(text="✓ Saved!", bg='#90EE90')
-        
-        # Update status to show saved state
-        self.boundary_status.config(text=f"✓ Saved! ({user_labeled}/{total} labeled, {unlabeled} unlabeled)")
-        
-        # Move to next image automatically
-        if self.current_idx < len(self.image_files) - 1:
-            self._next_image()
-        else:
-            messagebox.showinfo("Complete", "All images done!")
-            
+        # Persist final annotation file (simple atomic write so tests and CLI can inspect results)
+        try:
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = output_file.parent / (output_file.name + ".tmp")
+            with open(tmp_path, 'w', encoding='utf-8') as _tf:
+                json.dump(data, _tf, indent=2)
+                try:
+                    _tf.flush()
+                    os.fsync(_tf.fileno())
+                except Exception:
+                    pass
+            os.replace(str(tmp_path), str(output_file))
+        except Exception:
+            # Fall back to best-effort write
+            try:
+                with open(output_file, 'w', encoding='utf-8') as _tf:
+                    json.dump(data, _tf, indent=2)
+            except Exception:
+                pass
+        return output_file
+
+        # Ensure label button's state reflects current mode (disabled in 'segments', enabled otherwise)
+        try:
+            if self.mode == 'segments':
+                self.mode_buttons['label'].config(state=tk.DISABLED)
+            else:
+                self.mode_buttons['label'].config(state=tk.NORMAL)
+        except Exception:
+            pass
+
     def run(self):
         """Start the application."""
         self.root.mainloop()
@@ -3844,9 +3615,9 @@ class LabelingTool:
                 content.pack(pady=1, fill='x')
                 btn.config(text='▾')
             self.mode_buttons['segments'].config(bg='#90EE90')
-            # Keep Label button enabled so user can always switch modes
+            # Keep Label button disabled while in segments mode (avoids accidental mode switch)
             try:
-                self.mode_buttons['label'].config(state=tk.NORMAL)
+                self.mode_buttons['label'].config(state=tk.DISABLED)
             except Exception:
                 pass
             # Also show class selection and ensure submit stays in footer (visible at bottom)
@@ -3934,8 +3705,11 @@ class LabelingTool:
                             self._update_display()
                         except Exception:
                             pass
-            self.ax.set_title("LABEL MODE: Click segment to label (right-click to remove)")
-            self.canvas.draw()
+            try:
+                self.ax.set_title("LABEL MODE: Click segment to label (right-click to remove)")
+                self.canvas.draw()
+            except Exception:
+                pass
         elif mode == 'access':
             # Show access & roads
             content, btn = self.section_frames.get('7. Access & Roads', (None, None))

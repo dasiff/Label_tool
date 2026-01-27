@@ -11,6 +11,7 @@ from typing import Any, Dict
 import matplotlib.patches as mpatches
 import numpy as np
 import cv2
+from labeling.config import CLASS_COLORS
 
 
 def render_annotated_image(clean_image: Any, segments: Any, segment_labels: Dict[int, str], boundary: Any, **opts) -> Dict[str, Any]:
@@ -136,14 +137,11 @@ def _update_display(self):
         pixels_in_seg = seg_mask.sum()
         print(f"DEBUG: Segment {seg_id} has {pixels_in_seg} pixels")
         color = CLASS_COLORS.get(class_name, [0.9, 0.9, 0.9])
-        mask3 = np.stack([seg_mask] * 3, axis=2)
-        display[mask3] = display[mask3] * (1 - alpha) + np.array(color) * alpha
-
-    # Overlay boundary
-    try:
-        self._boundary_poly_artist.set_xy(self.current_boundary)
-    except Exception:
-        self._draw_editable_boundary()
+        # Blend per-channel to avoid boolean-mask broadcasting issues
+        for ch in range(3):
+            chan = display[:, :, ch]
+            chan[seg_mask] = chan[seg_mask] * (1 - alpha) + color[ch] * alpha
+            display[:, :, ch] = chan
 
     # Draw access overlays
     try:
