@@ -25,11 +25,14 @@ import time
 import threading
 import shutil
 import os
-import labeling.core.segment as segment_core
 
 # Import from existing codebase
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import labeling.core.segment as segment_core
+import labeling.core.boundary_utils as boundary_utils_core
+import labeling.render as render_core
+import labeling.core.manual_split as manual_split_core
 from app.core.boundary import estimate_boundary_from_overlay
 
 
@@ -1233,247 +1236,10 @@ class LabelingTool:
             pass
             
     def _generate_segments(self):
-        """Generate segments that follow edges with straight boundaries."""
-        if self.current_boundary is None:
-            return
-        
-        print(f"DEBUG _generate_segments: Using boundary with {len(self.current_boundary)} vertices")
-        print(f"DEBUG _generate_segments: Boundary corners: {self.current_boundary[:2]}")
-        
-        # Use clean image for segmentation
-        rgb = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        
-        # Fast preview mode uses a smaller scale for quick interactive feedback
-        if getattr(self, 'fast_preview_var', None) and self.fast_preview_var.get():
-            scale_factor = 0.25  # very small for fast previews
-            max_attempts_local = 2
-        else:
-            scale_factor = 0.5
-            max_attempts_local = 6
-        small_h, small_w = int(h * scale_factor), int(w * scale_factor)
-        rgb_small = cv2.resize(rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
-        
-        # Enhance contrast using CLAHE for better edge detection
-        bgr_small = cv2.cvtColor(rgb_small, cv2.COLOR_RGB2BGR)
-        lab = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2LAB)
-        l, a, b_channel = cv2.split(lab)
-
-        # Apply CLAHE only moderately to reduce shadow impact
-        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-        l_enhanced = clahe.apply(l)
-
-        # Normalize color channels to reduce shadow impact and emphasize material differences
-        # Boost color channels (a, b) relative to lightness to prioritize material over shadow
-        l_normalized = l_enhanced.astype(float) / 255.0
-        a_normalized = (a.astype(float) - 128) / 128.0  # Center and normalize
-        b_normalized = (b_channel.astype(float) - 128) / 128.0
-
-        # Default feature image (legacy): emphasize color over brightness
-        feature_img_default = np.stack([
-            l_normalized * 0.3,  # Reduce lightness weight (shadows)
-            a_normalized * 1.2,  # Boost green-red
-            b_normalized * 1.2   # Boost blue-yellow
-        ], axis=-1)
-
-        # Shadow-robust feature composition: chromaticity + gradient magnitude + color axes
-        if getattr(self, 'shadow_robust_var', None) and self.shadow_robust_var.get():
-            # Compute chromaticity channels (r/(r+g+b), g/(r+g+b)) to reduce brightness effect
-            arr = rgb_small.astype(np.float32)
-            denom = arr.sum(axis=2, keepdims=True) + 1e-6
-            chroma_r = (arr[:, :, 0:1] / denom).squeeze()
-            chroma_g = (arr[:, :, 1:2] / denom).squeeze()
-            # Use a and b channels from LAB for material color
-            # Compute gradient magnitude from grayscale (lightness) to emphasize edges
-            gray = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2GRAY).astype(np.float32)
-            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-            grad = np.sqrt(gx * gx + gy * gy)
-            # Normalize gradients to 0..1
-            if grad.max() > 0:
-                grad_norm = grad / grad.max()
-            else:
-                grad_norm = grad
-            # Compose feature image with a, b, and gradient (higher priority) - stack into 3 channels
-            feature_img = np.stack([
-                a_normalized,     # material color a
-                b_normalized,     # material color b
-                grad_norm         # edges/texture
-            ], axis=-1)
-        else:
-            feature_img = feature_img_default
-
-        # Scale back to 0-1 range and convert to uint8
-        feature_img = (feature_img - feature_img.min()) / (feature_img.max() - feature_img.min())
-        rgb_enhanced = (feature_img * 255).astype(np.uint8)
-        
-        # Create downsampled ROI mask from boundary
-        boundary_small = self.current_boundary * scale_factor
-        roi_mask_small = np.zeros((small_h, small_w), dtype=np.uint8)
-        cv2.fillPoly(roi_mask_small, [boundary_small.astype(np.int32)], 255)
-        roi_area = np.sum(roi_mask_small > 0)
-        # Compute buffer mask (in full-resolution coordinates) and map to small scale
-        self._compute_buffer_mask()  # ensures self.buffer_mask exists
-        if self.buffer_mask is not None:
-            buffer_small = cv2.resize(self.buffer_mask.astype(np.uint8), (small_w, small_h), interpolation=cv2.INTER_NEAREST) > 0
-        else:
-            buffer_small = np.zeros_like(roi_mask_small, dtype=bool)
-        # Build expanded ROI including interior + outside buffer area
-        roi_expanded_small = (roi_mask_small > 0) | buffer_small
-        # Create an edge/boundary mask (1-pixel) in the small scale and exclude it to make the boundary a hard split
-        edge_mask_small = np.zeros((small_h, small_w), dtype=np.uint8)
-        cv2.polylines(edge_mask_small, [boundary_small.astype(np.int32)], isClosed=True, color=255, thickness=1)
-        edge_mask_small = edge_mask_small > 0
-        # Exclude the boundary pixels from ROI to enforce split
-        roi_expanded_small[edge_mask_small] = False
-        # If shadow_robust was toggled, include its state in the debug prints
-        print(f"DEBUG _generate_segments: shadow_robust={getattr(self, 'shadow_robust_var', False).get() if hasattr(self, 'shadow_robust_var') else False}")
-        
-        # Build the feature image used for Felzenszwalb segmentation
-        # This abstracts the previous enhancement + gives us a shadow-robust path
-        rgb_enhanced = self._build_segment_features(rgb_small)
-
-        # Optionally pre-smooth to reduce texture/shadow noise
-        if getattr(self, 'pre_smooth_var', None) and self.pre_smooth_var.get():
-            try:
-                # bilateral on BGR image (preserve edges)
-                bgr_small = cv2.bilateralFilter(bgr_small, d=9, sigmaColor=75, sigmaSpace=75)
-                rgb_small = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2RGB)
-            except Exception:
-                pass
-
-        # Use Felzenszwalb segmentation - follows edges with straighter boundaries
-        # Adjust scale based on ROI size and target segments. The 'scale' parameter controls coarseness; smaller -> more segments.
-        estimated_scale = float(roi_area) / max(self.target_segments, 1)
-        # Apply a moderate multiplier and enforce a small lower bound to allow fine segmentation
-        init_scale = max(int(max(estimated_scale * 0.8, 10)), 10)
-        # Adjust min_size based on ROI area - for fast preview use larger minimum to reduce compute
-        if getattr(self, 'fast_preview_var', None) and self.fast_preview_var.get():
-            min_size_base = max(50, int(max(roi_area * 0.001, 50)))
-        else:
-            min_size_base = max(20, int(max(roi_area * 0.0005, 20)))  # Allow fairly small segments (>=20 px)
-
-        # Adaptive segmentation: try multiple attempts with decreasing scale/min_size if results are too coarse
-        scale = init_scale
-        min_size = min_size_base
-        max_attempts = max_attempts_local
-        attempt = 0
-        target_threshold = max(5, int(self.target_segments // 20))  # aim for at least this many segments
-        segments_small = None
-        segments_full = None
-        while attempt < max_attempts:
-            segments_small = felzenszwalb(rgb_enhanced, scale=scale, sigma=0, min_size=min_size)
-            # Upscale for evaluation
-            segments_full = cv2.resize(segments_small, (w, h), interpolation=cv2.INTER_NEAREST)
-            unique_full = len(np.unique(segments_full))
-            print(f"DEBUG _generate_segments attempt={attempt}, scale={scale}, min_size={min_size}, unique={unique_full}")
-            # If segmentation meets threshold, accept
-            if unique_full >= target_threshold:
-                break
-            # Otherwise, make segmentation finer and retry (more aggressive reductions)
-            attempt += 1
-            old_scale, old_min = scale, min_size
-            # Reduce scale by 40% (more gradual) and allow min_size down to 1
-            scale = max(1, int(max(1, scale * 0.6)))
-            min_size = max(1, int(max(1, min_size * 0.5)))
-            print(f"DEBUG _generate_segments: retry={attempt}, scale {old_scale}->{scale}, min_size {old_min}->{min_size}, unique_full={unique_full}")
-        # segments_small and segments_full set from last attempt
-
-        
-        # Mask out segments outside expanded ROI (interior + buffer) and renumber
-        # Compute full-resolution ROI mask (interior) and buffer mask (precomputed by _compute_buffer_mask)
-        roi_mask_full = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(roi_mask_full, [self.current_boundary.astype(np.int32)], 255)
-        roi_mask_bool = (roi_mask_full > 0)
-        # Ensure buffer mask computed
-        self._compute_buffer_mask()
-        if getattr(self, 'buffer_mask', None) is not None:
-            buffer_mask_full = self.buffer_mask.astype(bool)
-        else:
-            buffer_mask_full = np.zeros((h, w), dtype=bool)
-        # Build expanded ROI and exclude boundary edge pixels to enforce hard split
-        roi_expanded = roi_mask_bool | buffer_mask_full
-        edge_mask_full = np.zeros((h, w), dtype=np.uint8)
-        cv2.polylines(edge_mask_full, [self.current_boundary.astype(np.int32)], isClosed=True, color=255, thickness=1)
-        edge_mask_full = edge_mask_full > 0
-        roi_expanded[edge_mask_full] = False
-
-        segments = np.zeros_like(segments_full)
-        segment_map = {}  # Map old IDs to new IDs
-        new_id = 1
-        
-        # Kernels for morphological operations
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # Smooth edges
-        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))   # Break thin connections
-
-        # Preallocate gradient image for boundary strength checks (used in merging)
-        gray_full = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        gx = cv2.Sobel(gray_full, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(gray_full, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag_full = np.sqrt(gx * gx + gy * gy)
-        
-        for old_id in np.unique(segments_full):
-            seg_mask = (segments_full == old_id) & (roi_expanded)
-            # Allow much smaller segments to survive when target is high
-            if seg_mask.sum() < getattr(self, 'min_segment_px', 1000):  # Skip tiny segments
-                continue
-            
-            seg_mask_uint8 = seg_mask.astype(np.uint8) * 255
-            
-            # First: Apply morphological closing to smooth squiggly edges (fill indentations from parking lines)
-            closed = cv2.morphologyEx(seg_mask_uint8, cv2.MORPH_CLOSE, kernel_close)
-            
-            # Second: Apply morphological opening to break thin connections
-            opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open)
-            
-            # Find separate connected components after smoothing and breaking connections
-            labeled_components, num_components = ndimage.label(opened > 0)
-            
-            # Assign each disconnected chunk its own segment ID
-            for component_id in range(1, num_components + 1):
-                component_mask = labeled_components == component_id
-                if component_mask.sum() >= getattr(self, 'min_segment_px', 1000):  # Only keep chunks >= min_segment_px
-                    # Optionally simplify the component contour to reduce squiggles
-                    simp_mask = component_mask
-                    try:
-                        simp_mask = self._simplify_component_mask(component_mask, level=self.segment_smoothing_level)
-                    except Exception:
-                        pass
-                    if simp_mask.sum() >= getattr(self, 'min_segment_px', 1000):
-                        segments[simp_mask] = new_id
-                        new_id += 1
-
-        # After initial region construction, grad_mag_full is available for merging tests
-        self._grad_mag_full = grad_mag_full
-        
-        self.segments = segments
-        self.n_segments = segments.max()  # Actual segment count
-
-        # Enforce boundary as hard split to ensure no segment crosses the boundary
-        try:
-            self._enforce_boundary_split()
-        except Exception:
-            pass
-
-        # Optional auto-merge step to reduce spurious small regions (run after boundary split)
-        if getattr(self, 'auto_merge_var', None) and self.auto_merge_var.get():
-            try:
-                self._postprocess_merge(target=self.target_segments)
-            except Exception as e:
-                print('Warning: postprocess merge failed', e)
-
-
-        # Update smoothing level from current UI selection (if any)
-        try:
-            self.segment_smoothing_level = self.segment_smoothing_var.get()
-        except Exception:
-            pass
-
-        # Display segments
-        self._update_display()
-        
-        self.seg_status.config(text=f"✓ {self.n_segments} segments (target: {self.target_segments})")
-        self._update_progress()
+        """Thin wrapper calling implementation moved to labeling.core.segment._generate_segments
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return segment_core._generate_segments(self)
 
     def _segment_myself(self):
         """Start manual segmentation seeded by boundary+buffer (single region covering ROI+buffer)."""
@@ -1767,227 +1533,17 @@ class LabelingTool:
             self.manual_status.config(text="Split applied! Draw another or toggle off")
     
     def _simplify_component_mask(self, mask, level='med'):
-        """Simplify the polygon of a boolean component mask.
-        level: 'off'|'low'|'med'|'high'
-        Returns a boolean mask of the simplified polygon (same shape as mask).
+        """Thin wrapper calling implementation moved to labeling.core.segment._simplify_component_mask
+        (implementation was copied verbatim into that module as part of the atomic move).
         """
-        eps_frac = self.SMOOTHING_EPS.get(level, 0.01)
-        if eps_frac <= 0.0:
-            return mask
-        mask_uint8 = mask.astype('uint8') * 255
-        # Apply a small morphological closing to fill jagged teeth before contour extraction
-        kernel_size_map = {'off':1, 'low':3, 'med':5, 'high':7}
-        k = kernel_size_map.get(level, 5)
-        try:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-            closed0 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
-        except Exception:
-            closed0 = mask_uint8
-        contours, _ = cv2.findContours(closed0, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not contours:
-            return mask
-        c = max(contours, key=lambda x: cv2.contourArea(x))
-        perim = cv2.arcLength(c, True)
-        eps = max(1.0, perim * eps_frac)
-
-        # Optional contour smoothing (Chaikin corner cutting) to remove spike extremes
-        smoothing_iters_map = {'off': 0, 'low': 1, 'med': 2, 'high': 3}
-        iters = smoothing_iters_map.get(level, 2)
-
-        def chaikin(points, iterations=1):
-            pts = points.copy()
-            for _ in range(max(0, iterations)):
-                if len(pts) < 2:
-                    break
-                new_pts = []
-                n = len(pts)
-                for i in range(n):
-                    p0 = pts[i]
-                    p1 = pts[(i + 1) % n]
-                    q = 0.75 * p0 + 0.25 * p1
-                    r = 0.25 * p0 + 0.75 * p1
-                    new_pts.append(q)
-                    new_pts.append(r)
-                pts = np.array(new_pts)
-            return pts
-
-        try:
-            pts = c.reshape(-1, 2).astype(float)
-            if iters > 0 and len(pts) >= 3:
-                smoothed = chaikin(pts, iterations=iters)
-                # Remove consecutive duplicates and ensure at least 3 points
-                # Round to integer and remove duplicates preserving order
-                rounded = np.round(smoothed).astype(int)
-                # Remove duplicates by checking consecutive equal rows
-                keep_idx = [0]
-                for i in range(1, len(rounded)):
-                    if not np.array_equal(rounded[i], rounded[i - 1]):
-                        keep_idx.append(i)
-                rounded = rounded[keep_idx]
-                if len(rounded) >= 3:
-                    smooth_cnt = rounded.reshape(-1, 1, 2).astype(np.int32)
-                    approx = cv2.approxPolyDP(smooth_cnt, eps, True)
-                else:
-                    approx = cv2.approxPolyDP(c, eps, True)
-            else:
-                approx = cv2.approxPolyDP(c, eps, True)
-        except Exception:
-            approx = cv2.approxPolyDP(c, eps, True)
-
-        poly_mask = np.zeros_like(mask_uint8)
-        try:
-            cv2.fillPoly(poly_mask, [approx], 255)
-            poly_bool = poly_mask.astype(bool)
-            # Do not allow simplification to increase area beyond original - intersect with original mask
-            poly_bool = poly_bool & mask
-            # Ensure we didn't dramatically shrink area; otherwise fallback
-            area_thresholds = {'off': 1.0, 'low': 0.2, 'med': 0.5, 'high': 0.3}
-            frac = area_thresholds.get(level, 0.3)
-            if poly_bool.sum() >= max( int(mask.sum() * frac), 1 ):
-                return poly_bool
-            else:
-                return mask
-        except Exception:
-            return mask
+        return segment_core._simplify_component_mask(self, mask, level=level)
 
     def _postprocess_merge(self, target:int=None, min_size:int=None, boundary_grad_thresh:float=20.0):
-        if min_size is None:
-            min_size = getattr(self, 'min_segment_px', 100)
-        """Merge small regions towards neighbors based on color similarity and weak boundary strength.
-        - target: desired approximate number of segments. Merge small regions until reaching target or no merges possible.
-        - min_size: size below which a region is considered 'small' and eligible to be merged.
-        - boundary_grad_thresh: mean gradient magnitude threshold; don't merge across strong boundaries.
+        """Thin wrapper calling implementation moved to labeling.core.segment._postprocess_merge
+        (implementation was copied verbatim into that module as part of the atomic move).
         """
-        if self.segments is None:
-            return
-        seg = self.segments.copy()
-        h, w = seg.shape
-        unique_ids = [int(x) for x in np.unique(seg) if x != 0]
-        if len(unique_ids) <= 1:
-            return
-        # compute region areas and mean color
-        rgb = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2RGB).astype(float)
-        areas = {}
-        means = {}
-        for uid in unique_ids:
-            mask = (seg == uid)
-            areas[uid] = int(mask.sum())
-            if areas[uid] > 0:
-                means[uid] = rgb[mask].mean(axis=0)
-            else:
-                means[uid] = np.array([0.0, 0.0, 0.0])
-        # precompute adjacency and boundary gradients using edge pairs (right and down neighbors)
-        from collections import defaultdict
-        boundary_pixels = defaultdict(list)  # (a,b) -> list of coords
-        for dy, dx in [(0,1),(1,0)]:
-            a = seg[:, :-dx or None]
-            b = seg[:, dx or None:]
-            if dx == 1:
-                coords = np.argwhere(a != b)
-                for y,x in coords:
-                    id_a = int(seg[y,x])
-                    id_b = int(seg[y,x+1])
-                    if id_a == id_b or id_a == 0 or id_b == 0:
-                        continue
-                    key = tuple(sorted((id_a, id_b)))
-                    boundary_pixels[key].append((y,x))
-            else:
-                coords = np.argwhere(a != b)
-                for y,x in coords:
-                    id_a = int(seg[y,x])
-                    id_b = int(seg[y+1,x])
-                    if id_a == id_b or id_a == 0 or id_b == 0:
-                        continue
-                    key = tuple(sorted((id_a, id_b)))
-                    boundary_pixels[key].append((y,x))
-        # iterative small-region merging (merge small slivers even if current count <= target)
-        current_unique = set(unique_ids)
-        target = target or self.target_segments
-        iters = 0
-        while iters < 1000:
-            iters += 1
-            # find smallest region
-            small_id = min(current_unique, key=lambda u: areas.get(u, 0))
-            # Stop condition: smallest region large enough and we are at or below target
-            if areas.get(small_id, 0) >= min_size and len(current_unique) <= max(1, int(target)):
-                break
-            # find neighbors
-            neighbor_candidates = []
-            for pair, coords in boundary_pixels.items():
-                if small_id in pair:
-                    other = pair[0] if pair[1] == small_id else pair[1]
-                    neighbor_candidates.append((other, coords))
-            if not neighbor_candidates:
-                # isolated small region; remove it by assigning to largest region
-                largest = max(current_unique, key=lambda u: areas.get(u,0))
-                if largest == small_id:
-                    break
-                seg[seg==small_id] = largest
-                current_unique.remove(small_id)
-            else:
-                # evaluate best neighbor by color distance and boundary gradient
-                best_n = None
-                best_score = float('inf')
-                for other, coords in neighbor_candidates:
-                    grads = [self._grad_mag_full[y,x] for (y,x) in coords]
-                    mean_grad = float(np.mean(grads)) if grads else 0.0
-                    if mean_grad > boundary_grad_thresh:
-                        continue
-                    # color distance (Euclidean in RGB)
-                    dist = np.linalg.norm(means.get(small_id, np.zeros(3)) - means.get(other, np.zeros(3)))
-                    # prefer neighbor with small distance and reasonable area
-                    score = dist / (1 + areas.get(other,1))
-                    if score < best_score:
-                        best_score = score
-                        best_n = other
-                if best_n is None:
-                    # no neighbor suitable (strong borders) - stop
-                    break
-                seg[seg==small_id] = best_n
-                current_unique.remove(small_id)
-            # recompute adjacency/areas/means for next iteration
-            boundary_pixels = defaultdict(list)
-            unique_ids2 = set([int(x) for x in np.unique(seg) if x != 0])
-            for dy, dx in [(0,1),(1,0)]:
-                a = seg[:, :-dx or None]
-                b = seg[:, dx or None:]
-                if dx == 1:
-                    coords2 = np.argwhere(a != b)
-                    for y,x in coords2:
-                        id_a = int(seg[y,x])
-                        id_b = int(seg[y,x+1])
-                        if id_a == id_b or id_a == 0 or id_b == 0:
-                            continue
-                        key = tuple(sorted((id_a, id_b)))
-                        boundary_pixels[key].append((y,x))
-                else:
-                    coords2 = np.argwhere(a != b)
-                    for y,x in coords2:
-                        id_a = int(seg[y,x])
-                        id_b = int(seg[y+1,x])
-                        if id_a == id_b or id_a == 0 or id_b == 0:
-                            continue
-                        key = tuple(sorted((id_a, id_b)))
-                        boundary_pixels[key].append((y,x))
-            areas = {}
-            means = {}
-            for uid in unique_ids2:
-                mask = (seg == uid)
-                areas[uid] = int(mask.sum())
-                if areas[uid] > 0:
-                    means[uid] = rgb[mask].mean(axis=0)
-                else:
-                    means[uid] = np.array([0.0,0.0,0.0])
-        # reassign compact ids
-        new_seg = np.zeros_like(seg, dtype=np.int32)
-        new_id = 1
-        for uid in sorted([int(x) for x in np.unique(seg) if x != 0]):
-            new_seg[seg == uid] = new_id
-            new_id += 1
-        self.segments = new_seg
-        self.n_segments = int(self.segments.max())
-        print(f"_postprocess_merge: reduced to {self.n_segments} segments (target {target}) after {iters} iterations")
-        return
+        return segment_core._postprocess_merge(self, target=target, min_size=min_size, boundary_grad_thresh=boundary_grad_thresh)
+
 
 
     def _on_smoothing_change(self):
@@ -2033,7 +1589,12 @@ class LabelingTool:
         """Thin wrapper calling implementation moved to labeling.core.segment._build_segment_features
         (implementation was copied verbatim into that module as part of the atomic move).
         """
-        return segment_core._build_segment_features(self, rgb_small)
+        import time
+        start = time.perf_counter()
+        result = segment_core._build_segment_features(self, rgb_small)
+        duration = time.perf_counter() - start
+        print(f"_build_segment_features: {duration:.3f}s")
+        return result
 
     def _apply_manual_split_background_safe(self):
         """Background-safe split handler for common closed-loop polygons.
@@ -2314,50 +1875,8 @@ class LabelingTool:
                         other_endpoints.append(tuple(ol[-1]))
                 other_eps_arr = np.array([[pt[1], pt[0]] for pt in other_endpoints]) if other_endpoints else np.empty((0, 2))
 
-                # Start point snapping
-                nearest_edge_0_idx = np.argmin(dist_to_edges_0)
-                nearest_edge_0 = edge_coords[nearest_edge_0_idx]  # (y, x)
-                nearest_edge_dist_0 = float(dist_to_edges_0[nearest_edge_0_idx])
-
-                chosen0 = None
-                chosen0_source = 'edge'
-                # If any other drawn endpoint is closer (and within reasonable snap dist), prefer it
-                if other_eps_arr.shape[0] > 0:
-                    d_eps0 = np.linalg.norm(other_eps_arr - np.array([p0[1], p0[0]]), axis=1)
-                    ep0_idx = int(np.argmin(d_eps0))
-                    ep0_dist = float(d_eps0[ep0_idx])
-                    if ep0_dist <= min(nearest_edge_dist_0, max_snap_dist):
-                        # use other drawn endpoint
-                        chosen0 = other_endpoints[ep0_idx]
-                        chosen0_source = 'endpoint'
-                if chosen0 is None:
-                    # If nearest edge is within allowed snap distance, use it; otherwise still use it but mark as distant
-                    chosen0 = (int(nearest_edge_0[1]), int(nearest_edge_0[0]))
-                    chosen0_source = 'edge' if nearest_edge_dist_0 <= max_snap_dist else 'edge_distant'
-                edge_pt_0 = chosen0
-
-                # Last point snapping - avoid choosing the same exact edge pixel as start
-                nearest_edge_last_idx = np.argmin(dist_to_edges_last)
-                # If the nearest is same as start, try second-best
-                if nearest_edge_last_idx == nearest_edge_0_idx and len(dist_to_edges_last) > 1:
-                    sorted_idx = np.argsort(dist_to_edges_last)
-                    nearest_edge_last_idx = int(sorted_idx[1])
-                nearest_edge_last = edge_coords[nearest_edge_last_idx]
-                nearest_edge_dist_last = float(dist_to_edges_last[nearest_edge_last_idx])
-
-                chosen_last = None
-                chosen_last_source = 'edge'
-                if other_eps_arr.shape[0] > 0:
-                    d_eplast = np.linalg.norm(other_eps_arr - np.array([p_last[1], p_last[0]]), axis=1)
-                    ep_last_idx = int(np.argmin(d_eplast))
-                    ep_last_dist = float(d_eplast[ep_last_idx])
-                    if ep_last_dist <= min(nearest_edge_dist_last, max_snap_dist):
-                        chosen_last = other_endpoints[ep_last_idx]
-                        chosen_last_source = 'endpoint'
-                if chosen_last is None:
-                    chosen_last = (int(nearest_edge_last[1]), int(nearest_edge_last[0]))
-                    chosen_last_source = 'edge' if nearest_edge_dist_last <= max_snap_dist else 'edge_distant'
-                edge_pt_last = chosen_last
+                # Use shared helper to compute snapped endpoints
+                edge_pt_0, edge_pt_last, chosen0_source, chosen_last_source = manual_split_core.snap_endpoints(p0, p_last, edge_coords, other_endpoints, max_snap_dist)
 
                 # Debug print what snapping source we chose and store for tests/debugging
                 try:
@@ -2374,63 +1893,9 @@ class LabelingTool:
                     pass
 
                 # If snapping caused endpoints to collapse (very close together), try a contour-intersection or farthest-projection fallback
-                def _stretch_endpoints_if_collapsed(ep0, ep1, seg_uint8_local):
-                    dx = ep0[0] - ep1[0]
-                    dy = ep0[1] - ep1[1]
-                    if dx*dx + dy*dy > 25:
-                        return ep0, ep1
-                    try:
-                        contours, _ = cv2.findContours(seg_uint8_local*255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                        if contours:
-                            c = max(contours, key=lambda x: cv2.contourArea(x)).reshape(-1,2)
-                            p0f = np.array(p0, dtype=float)
-                            p1f = np.array(p_last, dtype=float)
-                            line_dir = p1f - p0f
-                            if np.linalg.norm(line_dir) > 1e-6:
-                                inters = []
-                                for i in range(len(c)):
-                                    A = c[i]
-                                    B = c[(i+1) % len(c)]
-                                    A = np.array([float(A[0]), float(A[1])])
-                                    B = np.array([float(B[0]), float(B[1])])
-                                    s = B - A
-                                    r = line_dir
-                                    M = np.column_stack((s, -r))
-                                    bvec = (p0f - A)
-                                    try:
-                                        sol, *_ = np.linalg.lstsq(M, bvec, rcond=None)
-                                        t = float(sol[0]); u = float(sol[1])
-                                        if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
-                                            X = A + t * s
-                                            inters.append((float(X[0]), float(X[1])))
-                                    except Exception:
-                                        continue
-                                if len(inters) >= 2:
-                                    us = [np.dot(np.array(p)-p0f, line_dir)/np.dot(line_dir,line_dir) for p in inters]
-                                    sidx = np.argsort(us)
-                                    pA = inters[sidx[0]]
-                                    pB = inters[sidx[-1]]
-                                    return (int(round(pA[0])), int(round(pA[1]))), (int(round(pB[0])), int(round(pB[1])))
-                            # If contour intersection failed, fallback to projection extremes along the line within the segment
-                            pts = np.argwhere(seg_uint8_local > 0)  # (y,x)
-                            if pts.shape[0] > 0:
-                                pts_xy = np.vstack([pts[:,1], pts[:,0]]).T.astype(float)
-                                p0f = np.array(p0, dtype=float)
-                                p1f = np.array(p_last, dtype=float)
-                                r = p1f - p0f
-                                denom = np.dot(r,r)
-                                if denom > 1e-6:
-                                    us = np.dot(pts_xy - p0f, r) / denom
-                                    min_idx = np.argmin(us)
-                                    max_idx = np.argmax(us)
-                                    pA = pts_xy[min_idx]
-                                    pB = pts_xy[max_idx]
-                                    return (int(round(pA[0])), int(round(pA[1]))), (int(round(pB[0])), int(round(pB[1])))
-                    except Exception:
-                        pass
-                    return ep0, ep1
 
-                edge_pt_0, edge_pt_last = _stretch_endpoints_if_collapsed(edge_pt_0, edge_pt_last, seg_uint8)
+
+                edge_pt_0, edge_pt_last = manual_split_core.stretch_endpoints_if_collapsed(edge_pt_0, edge_pt_last, seg_uint8, p0, p_last)
                 
                 print(f"    Snapping: {tuple(p0)} -> {edge_pt_0}, {tuple(p_last)} -> {edge_pt_last}")
             
@@ -2959,36 +2424,10 @@ class LabelingTool:
         self._compute_buffer_mask()
 
     def _closest_point_on_boundary(self, x, y):
-        """Return closest projected point on boundary and fraction along boundary length."""
-        if self.current_boundary is None:
-            return None, None
-        pts = self.current_boundary
-        # compute segment lengths and cumulative
-        seg_starts = pts
-        seg_ends = np.vstack([pts[1:], pts[0]])
-        seg_vecs = seg_ends - seg_starts
-        seg_lens = np.linalg.norm(seg_vecs, axis=1)
-        cum = np.concatenate([[0], np.cumsum(seg_lens)])
-        total = cum[-1]
-        best_dist = float('inf')
-        best_pt = None
-        best_frac = 0.0
-        best_seg_idx = 0
-        px = np.array([x, y])
-        for i, (a, b, v, L) in enumerate(zip(seg_starts, seg_ends, seg_vecs, seg_lens)):
-            if L == 0:
-                continue
-            t = np.dot(px - a, v) / (L * L)
-            t_clamped = max(0.0, min(1.0, t))
-            proj = a + t_clamped * v
-            d = np.linalg.norm(proj - px)
-            if d < best_dist:
-                best_dist = d
-                best_pt = proj
-                frac = (cum[i] + L * t_clamped) / total if total > 0 else 0.0
-                best_frac = frac % 1.0
-                best_seg_idx = i
-        return best_pt, best_frac
+        """Thin wrapper calling implementation moved to labeling.core.boundary_utils._closest_point_on_boundary
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return boundary_utils_core._closest_point_on_boundary(self, x, y)
     
     def _add_boundary_access_click(self, x, y, click_button):
         """Handle click for boundary access annotation."""
@@ -3037,65 +2476,10 @@ class LabelingTool:
             return
 
     def _draw_access_segments(self):
-        """Draw access segments on the current axis (used in both edit and display modes)."""
-        if self.current_boundary is None:
-            return
-        if not hasattr(self, 'access_artists'):
-            self.access_artists = []
-        # Remove old artists
-        for a in getattr(self, 'access_artists', []):
-            try:
-                a.remove()
-            except:
-                pass
-        self.access_artists = []
-        pts = self.current_boundary
-        # Build cumulative lengths
-        seg_starts = pts
-        seg_ends = np.vstack([pts[1:], pts[0]])
-        seg_vecs = seg_ends - seg_starts
-        seg_lens = np.linalg.norm(seg_vecs, axis=1)
-        cum = np.concatenate([[0], np.cumsum(seg_lens)])
-        total = cum[-1]
-        def frac_to_point(frac):
-            f = (frac % 1.0) * total
-            # find segment containing f
-            idx = np.searchsorted(cum, f, side='right') - 1
-            idx = max(0, min(idx, len(seg_lens)-1))
-            local_f = (f - cum[idx]) / (seg_lens[idx] if seg_lens[idx]>0 else 1e-6)
-            pt = seg_starts[idx] + seg_vecs[idx] * local_f
-            return pt
-        for seg in self.boundary_access_segments:
-            s, e = seg['start_frac'], seg['end_frac']
-            # Skip full default 'no_access' to avoid a thick gold overlay for the entire boundary
-            if seg.get('label') == 'no_access':
-                # Compute segment length properly
-                if e >= s:
-                    seg_len = e - s
-                else:
-                    seg_len = (1.0 - s) + e
-                if seg_len >= 0.99:
-                    continue
-            # sample along shorter arc
-            samples = np.linspace(s, e, num=50) if s <= e else np.linspace(s, e+1, num=50)
-            pts_samples = np.array([frac_to_point(ss % 1.0) for ss in samples])
-            if seg.get('label') == 'access_allowed':
-                color = '#00FF00'
-                lw = 3
-                style = {'linewidth': lw, 'solid_capstyle': 'round'}
-            else:
-                # Subtle rendering for explicit 'no_access' segments (non-full)
-                color = '#FFD700'
-                lw = 1.0
-                style = {'linewidth': lw, 'linestyle': '--'}
-            artist, = self.ax.plot(pts_samples[:,0], pts_samples[:,1], color=color, **style)
-            self.access_artists.append(artist)
-        # Draw provisional first-click point
-        if self.access_click_start is not None:
-            pt = self.access_click_start['pt']
-            artist = self.ax.scatter([pt[0]], [pt[1]], c='white', s=60, edgecolor='black', zorder=20)
-            self.access_artists.append(artist)
-        self.canvas.draw()
+        """Thin wrapper calling implementation moved to labeling.render._draw_access_segments
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return render_core._draw_access_segments(self)
 
     def _update_boundary_artists(self):
         """Fast update of existing boundary polygon only (vertex handles removed).
@@ -3152,27 +2536,10 @@ class LabelingTool:
                 t_draw1 = time.time(); print(f"PROFILE: canvas_draw {t_draw1-t_draw0:.4f}s")
 
     def _compute_buffer_mask(self):
-        """Compute buffer mask (bool) outside the property boundary within buffer distance."""
-        if self.current_boundary is None:
-            self.buffer_mask = None
-            return
-        h, w = self.clean_image.shape[:2]
-        # Create ROI mask for interior (filled polygon)
-        roi_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(roi_mask, [self.current_boundary.astype(np.int32)], 255)
-        # Create an edge mask of the boundary and compute distance transform outside
-        edge_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.polylines(edge_mask, [self.current_boundary.astype(np.int32)], isClosed=True, color=255, thickness=1)
-        invert = (edge_mask == 0).astype(np.uint8) * 255
-        dist = cv2.distanceTransform(invert, cv2.DIST_L2, 5)
-        if self.buffer_mode_var.get() == 'px':
-            thresh = self.road_buffer_px
-        else:
-            val = self.road_buffer_pct
-            thresh = min(h, w) * val
-        buffer_mask = (dist <= thresh) & (roi_mask == 0)
-        # Store as boolean mask
-        self.buffer_mask = buffer_mask.astype(bool)
+        """Thin wrapper calling implementation moved to labeling.core.boundary_utils._compute_buffer_mask
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return boundary_utils_core._compute_buffer_mask(self)
 
     def _schedule_coalesced_draw(self):
         """Schedule a single draw after a short delay to coalesce frequent updates."""
@@ -3232,30 +2599,11 @@ class LabelingTool:
         self._update_display()
         
     def _draw_editable_boundary(self):
-        """Draw boundary polygon (vertex dragging disabled)."""
-        if self.current_boundary is None:
-            return
-        
-        # Don't try to remove artists - just clear the list
-        # The ax.clear() in redraw will handle removing them
-        self.boundary_vertices_artists.clear()
-        
-        # Draw only the polygon (vertex dragging disabled)
-        poly = mpatches.Polygon(self.current_boundary, fill=False, edgecolor='yellow', linewidth=1, joinstyle='round')
-        # Remove any previous polygon artist if present
-        try:
-            if getattr(self, '_boundary_poly_artist', None) is not None:
-                try:
-                    self._boundary_poly_artist.remove()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        self._boundary_poly_artist = poly
-        self.ax.add_patch(poly)
-        # Avoid drawing access overlays while user is actively dragging the whole boundary
-        if not getattr(self, 'dragging_boundary', False):
-            self._draw_access_segments() 
+        """Thin wrapper calling implementation moved to labeling.render._draw_editable_boundary
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return render_core._draw_editable_boundary(self)
+
     
     def _on_click(self, event):
         """Handle click events for boundary dragging, manual splitting, or segment labeling."""
@@ -3747,102 +3095,16 @@ class LabelingTool:
         self.canvas.draw()
     
     def _update_display(self):
-        """Update the display with enhanced contrast for better visibility."""
-        if self.segments is None:
-            return
-        
-        # Create enhanced version if not cached
-        if self.enhanced_image is None:
-            lab = cv2.cvtColor(self.clean_image, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            l_enhanced = clahe.apply(l)
-            lab_enhanced = cv2.merge([l_enhanced, a, b])
-            self.enhanced_image = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB)
-        rgb = self.enhanced_image
-        
-        h, w = rgb.shape[:2]
-        
-        # Start with original image (keep colors vivid!)
-        display = rgb.copy().astype(float) / 255
-        
-        # Fill labeled segments with semi-transparent class color
-        alpha = 0.4  # Blend factor
-        print(f"DEBUG _update_display: segment_labels = {self.segment_labels}")
-        for seg_id, class_name in self.segment_labels.items():
-            print(f"DEBUG: Rendering segment {seg_id} as {class_name}")
-            seg_mask = self.segments == seg_id
-            pixels_in_seg = seg_mask.sum()
-            print(f"DEBUG: Segment {seg_id} has {pixels_in_seg} pixels")
-            if pixels_in_seg < 50:  # Skip tiny segments
-                print(f"DEBUG: Skipping segment {seg_id} - too small")
-                continue
-            color = CLASS_COLORS.get(class_name, [1, 1, 1])
-            print(f"DEBUG: Applying color {color} to segment {seg_id}")
-            display[seg_mask] = display[seg_mask] * (1 - alpha) + np.array(color) * alpha
-        
-        # Find all segment boundaries
-        seg_pad = np.pad(self.segments, 1, mode='edge')
-        edge_h = (seg_pad[:-2, 1:-1] != seg_pad[2:, 1:-1])
-        edge_v = (seg_pad[1:-1, :-2] != seg_pad[1:-1, 2:])
-        all_edges = edge_h | edge_v
-        
-        # Draw segment boundaries in white for clarity; keep property boundary as highlighted polygon
-        display[all_edges] = [1, 1, 1]  # White
-
-
-
-        self.ax.clear()
-        self.ax.imshow(display, extent=[0, w, h, 0], aspect='equal')
-        
-        # Add segment ID numbers to help with manual splitting
-        for seg_id in range(1, min(self.n_segments + 1, 200)):  # Limit to first 200 segments to avoid clutter
-            seg_mask = self.segments == seg_id
-            if seg_mask.sum() >= getattr(self, 'min_segment_px', 1000):  # Show segments larger than min_segment_px
-                coords = np.argwhere(seg_mask)
-                if len(coords) > 0:
-                    centroid_y, centroid_x = coords.mean(axis=0)
-                    self.ax.text(centroid_x, centroid_y, str(seg_id), 
-                               color='white', fontsize=7, ha='center', va='center',
-                               bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.5, edgecolor='none'))
-        
-        # Add boundary
-        if self.current_boundary is not None:
-            poly = mpatches.Polygon(self.current_boundary, fill=False,
-                                   edgecolor='yellow', linewidth=1, joinstyle='round')
-            self.ax.add_patch(poly)
-        
-        # Re-draw manual lines if in manual mode
-        if self.manual_mode:
-            # Draw completed polylines in green
-            for polyline in self.manual_polylines:
-                points = np.array(polyline)
-                artist, = self.ax.plot(points[:, 0], points[:, 1], 'g-', linewidth=2, marker='o', markersize=4)
-                self.manual_line_artists.append(artist)
-            
-            # Draw current polyline being drawn in red
-            if len(self.manual_line_points) > 0:
-                points = np.array(self.manual_line_points)
-                if len(points) == 1:
-                    artist, = self.ax.plot(points[:, 0], points[:, 1], 'ro', markersize=5)
-                else:
-                    artist, = self.ax.plot(points[:, 0], points[:, 1], 'r-', linewidth=2, marker='o', markersize=4)
-                self.manual_line_artists.append(artist)
-        
-        # Set title based on current mode
-        if self.boundary_access_mode or self.mode == 'access':
-            self.ax.set_title("BOUNDARY ACCESS MODE: Click two points on boundary to add access segment")
-        elif self.manual_mode:
-            self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
-        else:
-            self.ax.set_title("LABEL MODE: Click segment to label (right-click to remove)")
-        self.ax.axis('off')
-        # Draw boundary access overlays (if any)
-        self._draw_access_segments()
-        self.canvas.draw()
+        """Thin wrapper calling implementation moved to labeling.render._update_display
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return render_core._update_display(self)
     
     def _update_display_with_highlight(self, highlight_seg_id):
-        """Update display with a specific segment highlighted."""
+        """Thin wrapper calling implementation moved to labeling.render._update_display_with_highlight
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return render_core._update_display_with_highlight(self, highlight_seg_id)
         if self.segments is None:
             return
         
@@ -3934,6 +3196,12 @@ class LabelingTool:
                 text=f"Labeled: 0% of pixels"
             )
         
+    def _update_display_with_highlight(self, highlight_seg_id):
+        """Thin wrapper calling implementation moved to labeling.render._update_display_with_highlight
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return render_core._update_display_with_highlight(self, highlight_seg_id)
+
     def _auto_fill_unlabeled_segments(self):
         """Auto-fill unlabeled segments using nearest neighbor approach."""
         if self.segments is None:
