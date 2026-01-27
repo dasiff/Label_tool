@@ -18,10 +18,11 @@ def test_labeling_in_segments_mode():
     x, y = 50, 50
     lt._on_click(type('E', (), {'inaxes': lt.ax, 'xdata': x, 'ydata': y, 'button': 1}))
 
-    assert 1 in lt.segment_labels
-    assert lt.segment_labels[1] == lt.class_var.get()
+    # Should NOT label directly in Segments mode; instead segment is selected for splitting
+    assert 1 not in lt.segment_labels
+    assert lt.splitting_segment_id == 1
 
-    # Right-click should remove label
+    # Right-click removes label only if present (no-op here)
     lt._on_click(type('E', (), {'inaxes': lt.ax, 'xdata': x, 'ydata': y, 'button': 3}))
     assert 1 not in lt.segment_labels
 
@@ -37,7 +38,6 @@ def test_click_selects_for_split_when_manual_mode_on():
     lt.n_segments = 1
 
     lt._set_mode('segments')
-    lt.manual_mode = True
     # Click inside to select for split
     x, y = 50, 50
     lt._on_click(type('E', (), {'inaxes': lt.ax, 'xdata': x, 'ydata': y, 'button': 1}))

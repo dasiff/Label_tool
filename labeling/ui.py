@@ -42,9 +42,9 @@ def _update_title_for_mode(self):
             except Exception:
                 pass
         elif getattr(self, 'mode', None) == 'segments':
-            if getattr(self, 'manual_mode', False):
+            if getattr(self, 'splitting_segment_id', None) is not None or len(getattr(self, 'manual_line_points', [])) > 0:
                 try:
-                    self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
+                    self.ax.set_title("SPLIT MODE: Draw lines (Esc=reselect, Space=new line, Enter=apply)")
                 except Exception:
                     pass
             else:
@@ -69,9 +69,9 @@ def _update_title_for_mode(self):
                     self.ax.set_title("Adjust boundary (drag corners to reshape, arrows=move, </>=rotate)")
                 except Exception:
                     pass
-            elif getattr(self, 'manual_mode', False):
+            elif getattr(self, 'splitting_segment_id', None) is not None or len(getattr(self, 'manual_line_points', [])) > 0:
                 try:
-                    self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
+                    self.ax.set_title("SPLIT MODE: Draw lines (Esc=reselect, Space=new line, Enter=apply)")
                 except Exception:
                     pass
             else:

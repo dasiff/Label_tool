@@ -118,7 +118,10 @@ def apply_manual_split_background_safe(self):
                     self.manual_status.config(text="Split applied! Draw another or toggle off")
                     try:
                         self.finalize_btn.config(state=tk.NORMAL)
-                        self.manual_btn.config(state=tk.NORMAL)
+                        try:
+                            self.finalize_btn.config(state=tk.NORMAL)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     if new_segment_selected is not None:

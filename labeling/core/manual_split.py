@@ -154,6 +154,60 @@ def apply_manual_split(self):
             if not poly_snapped:
                 all_open_polylines_snapped = False
 
+            # If snapped endpoints lie outside the selected segment (e.g., along irregular boundary),
+            # nudge them slightly inward toward the segment centroid so the cut passes through the
+            # interior rather than along the exterior edge.
+            try:
+                def _nudge_point_inside(seg_mask_uint8, pt_xy, max_nudge=10):
+                    # seg_mask_uint8: 2D uint8 mask (1 inside segment), pt_xy: (x,y)
+                    h, w = seg_mask_uint8.shape
+                    x0, y0 = int(pt_xy[0]), int(pt_xy[1])
+                    # If already inside but located on an edge pixel, treat it as outside to nudge inward
+                    def _is_edge(xi, yi):
+                        if not (0 <= yi < h and 0 <= xi < w):
+                            return False
+                        if not seg_mask_uint8[yi, xi]:
+                            return False
+                        # If any 8-neighborhood neighbor is outside, it's an edge
+                        for ny in range(max(0, yi-1), min(h, yi+2)):
+                            for nx in range(max(0, xi-1), min(w, xi+2)):
+                                if not seg_mask_uint8[ny, nx]:
+                                    return True
+                        return False
+
+                    if 0 <= y0 < h and 0 <= x0 < w and seg_mask_uint8[y0, x0] and not _is_edge(x0, y0):
+                        return (x0, y0)
+                    # Compute centroid of segment in (y,x) coordinates
+                    ysxs = np.argwhere(seg_mask_uint8 > 0)
+                    if ysxs.size == 0:
+                        return (x0, y0)
+                    centroid_y, centroid_x = ysxs.mean(axis=0)
+                    # Direction from point toward centroid (in x,y)
+                    dir_x = centroid_x - x0
+                    dir_y = centroid_y - y0
+                    norm = np.hypot(dir_x, dir_y)
+                    if norm < 1e-6:
+                        return (x0, y0)
+                    ux, uy = dir_x / norm, dir_y / norm
+                    for step in range(1, max_nudge + 1):
+                        nx = int(round(x0 + ux * step))
+                        ny = int(round(y0 + uy * step))
+                        if 0 <= ny < h and 0 <= nx < w and seg_mask_uint8[ny, nx]:
+                            return (nx, ny)
+                    return (x0, y0)
+
+                # Apply inward nudging to each snapped endpoint
+                try:
+                    edge_pt_0 = _nudge_point_inside(seg_uint8, edge_pt_0, max_nudge=10)
+                except Exception:
+                    pass
+                try:
+                    edge_pt_last = _nudge_point_inside(seg_uint8, edge_pt_last, max_nudge=10)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
             # Build extended polyline including snapped endpoints
             extended = [edge_pt_0] + [tuple(pt) for pt in pts[1:-1]] + [edge_pt_last]
             open_polylines.append(extended)
@@ -162,6 +216,43 @@ def apply_manual_split(self):
     if open_polylines:
         line_mask = build_combined_line_mask(open_polylines, seg_mask, (h, w), thickness=line_thickness, endpoint_radius=endpoint_radius)
 
+        # If the constructed line_mask is unexpectedly small (e.g., endpoints on boundary
+        # resulted in a very short intersection), try extending the endpoints slightly into
+        # the interior to ensure the cut traverses the segment.
+        try:
+            if line_mask.sum() < max(10, int(seg_area * 0.002)):
+                # Compute centroid of the segment (y,x)
+                ysxs = np.argwhere(seg_mask)
+                if ysxs.size > 0:
+                    cy, cx = ysxs.mean(axis=0)
+                    for poly in open_polylines:
+                        # first and last points
+                        p0 = tuple(poly[0])
+                        p1 = tuple(poly[-1])
+                        # Cast to integer tuples
+                        p0i = (int(round(p0[0])), int(round(p0[1])))
+                        p1i = (int(round(p1[0])), int(round(p1[1])))
+                        # Create a short line from p0/p1 toward centroid
+                        for px, py in (p0i, p1i):
+                            dir_x = cx - px
+                            dir_y = cy - py
+                            norm = (dir_x**2 + dir_y**2) ** 0.5
+                            if norm < 1e-6:
+                                continue
+                            ux, uy = dir_x / norm, dir_y / norm
+                            # extend 5..15 pixels inward
+                            for ext in (5, 10, 15):
+                                nx = int(round(px + ux * ext))
+                                ny = int(round(py + uy * ext))
+                                if 0 <= ny < h and 0 <= nx < w and seg_mask[ny, nx]:
+                                    # Draw a small connecting line
+                                    try:
+                                        cv2.line(line_mask, (px, py), (nx, ny), color=255, thickness=line_thickness)
+                                        break
+                                    except Exception:
+                                        pass
+        except Exception:
+            pass
 
 
     
@@ -219,7 +310,6 @@ def apply_manual_split(self):
             pass
         try:
             self.finalize_btn.config(state='normal')
-            self.manual_btn.config(state='normal')
         except Exception:
             pass
         # Keep newly created segment selected
@@ -278,11 +368,25 @@ def _apply_split_core(self, seg_mask, line_mask, full_line_mask, seg_id, points,
     region_sizes.sort(reverse=True)
 
     # Only attempt direct split
-    min_side_size = max(100, int(seg_area * 0.01))
-    if num_regions >= 2 and region_sizes[0][0] >= min_side_size and region_sizes[1][0] >= min_side_size:
-        new_segments, applied, info = _attempt_direct_split(self, new_segments, seg_id, labeled_regions, region_sizes, min_side_px=min_side_size)
-        if applied:
-            return new_segments, True, info
+    # Use a more permissive floor so uneven splits (small piece + large piece) can succeed
+    min_side_size = max(30, int(seg_area * 0.01))
+    if num_regions >= 2:
+        # Primary attempt: require both sides to meet full minimum
+        if region_sizes[0][0] >= min_side_size and region_sizes[1][0] >= min_side_size:
+            new_segments, applied, info = _attempt_direct_split(self, new_segments, seg_id, labeled_regions, region_sizes, min_side_px=min_side_size)
+            if applied:
+                return new_segments, True, info
+        # Secondary attempt: allow an uneven split if the smaller side is at least a small floor
+        small_floor = 20
+        if region_sizes[1][0] >= small_floor:
+            # Try a relaxed direct split with a lower min_side_px
+            new_segments_relaxed, applied_relaxed, info_relaxed = _attempt_direct_split(self, new_segments, seg_id, labeled_regions, region_sizes, min_side_px=small_floor)
+            if applied_relaxed:
+                try:
+                    info_relaxed['note'] = 'applied_relaxed_min'
+                except Exception:
+                    pass
+                return new_segments_relaxed, True, info_relaxed
 
     return new_segments, False, {'reason': 'no_split'}
 

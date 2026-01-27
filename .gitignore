@@ -27,3 +27,24 @@ dist/
 
 # temporary
 tmp/
+# Ignore raw and large data
+data/
+raw_images/
+models/
+*.npy
+*.npz
+*.db
+# Notebooks and interactive files
+*.ipynb
+Interactive-1.interactive.ipynb
+# Temp and outputs
+tmp*
+tmp_test*/
+tmp_test_outputs/
+# Docs images and export folders
+docs/images/
+.results/
+# Editor and env
+.venv/
+.vscode/
+.DS_Store

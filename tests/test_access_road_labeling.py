@@ -86,14 +86,12 @@ def test_road_paint_and_constraints(tool, tmp_path):
 
 
 def test_shortcuts_toggle_and_escape(tool):
-    # Keyboard 'm' toggles manual/split mode
+    # 'm' toggle was removed; pressing 'm' should not change manual_mode or splitting selection
     from types import SimpleNamespace
-    assert not tool.manual_mode
+    prev = tool.manual_mode
     tool._on_key_press(SimpleNamespace(key='m'))
-    assert tool.manual_mode
-    # Toggle back
-    tool._on_key_press(SimpleNamespace(key='m'))
-    assert not tool.manual_mode
+    assert tool.manual_mode == prev
+    assert getattr(tool, 'splitting_segment_id', None) is None
 
     # 'b' toggles boundary access mode
     assert not tool.boundary_access_mode

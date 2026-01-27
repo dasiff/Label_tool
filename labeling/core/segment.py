@@ -99,6 +99,12 @@ def _generate_segments(self):
     else:
         scale_factor = 0.5
         max_attempts_local = 6
+    # If the user requested a very high target_segments, favor a higher-resolution
+    # feature scale so that small texture details are preserved and segmentation
+    # can produce many regions (avoids flaky low-count outputs on small previews).
+    if getattr(self, 'target_segments', 0) > 200:
+        scale_factor = max(scale_factor, 0.5)
+        max_attempts_local = max(max_attempts_local, 6)
     small_h, small_w = int(h * scale_factor), int(w * scale_factor)
     rgb_small = cv2.resize(rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
 

@@ -17,5 +17,6 @@ def test_unapprove_boundary_allows_edit(monkeypatch):
     lt._unapprove_boundary()
     assert lt.boundary_approved is False
     # After unapproving, the manual button should say Split Mode (Off) and finalize disabled
-    assert lt.manual_btn.cget('text').startswith('Split Mode')
+    # Split toggle removed: ensure Apply button exists instead
+    assert lt.finalize_btn is not None
     assert lt.finalize_btn.cget('state') in ('disabled', 'disabled') or lt.finalize_btn.cget('state') == 'disabled'
