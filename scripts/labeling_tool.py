@@ -562,9 +562,9 @@ class LabelingTool:
             pass
         # Floating save button in the top-right corner for guaranteed visibility
         try:
-            self.floating_save_btn = tk.Button(self.root, text="💾 Save", command=self._save_draft, bg='#E0E0E0')
-            # place relative to root so it's visible regardless of panel clipping
-            self.floating_save_btn.place(relx=0.98, rely=0.02, anchor='ne')
+            self.floating_save_btn = tk.Button(self.root, text="💾 Save", command=self._save_draft, bg='#E0E0E0', width=10)
+            # place slightly inset from the top-right so the button is not obscured by the image panel
+            self.floating_save_btn.place(relx=0.92, rely=0.02, anchor='ne')
             self.floating_save_visible = True
         except Exception:
             self.floating_save_btn = None
@@ -1313,11 +1313,27 @@ class LabelingTool:
         """Increase segment count (more segments)."""
         self.target_segments = min(int(self.target_segments * 1.5), 2000)
         self._generate_segments()
+        # If segmentation failed to produce segments, draw the boundary and show a hint
+        if getattr(self, 'segments', None) is None:
+            try:
+                self._draw_editable_boundary()
+                self.seg_status.config(text="No segments generated — try 'Segment Myself' or adjust parameters")
+                self.canvas.draw()
+            except Exception:
+                pass
     
     def _coarsen_segments(self):
         """Decrease segment count (fewer segments)."""
         self.target_segments = max(int(self.target_segments / 1.5), 10)
         self._generate_segments()
+        # If segmentation failed to produce segments, draw the boundary and show a hint
+        if getattr(self, 'segments', None) is None:
+            try:
+                self._draw_editable_boundary()
+                self.seg_status.config(text="No segments generated — try 'Segment Myself' or adjust parameters")
+                self.canvas.draw()
+            except Exception:
+                pass
     
     def _update_title_for_mode(self):
         """Thin wrapper delegating to `labeling.ui._update_title_for_mode`."""
@@ -2950,6 +2966,14 @@ class LabelingTool:
                 self._approve_boundary()
             try:
                 self._set_mode('segments')
+                # If segmentation did not produce any segments, show the boundary and a helpful hint
+                if getattr(self, 'segments', None) is None:
+                    try:
+                        self._draw_editable_boundary()
+                        self.ax.set_title("SEGMENT MODE: No segments generated yet — click 'Segment Myself' or '+ More'")
+                        self.canvas.draw()
+                    except Exception:
+                        pass
             except Exception:
                 pass
             return
@@ -3712,7 +3736,8 @@ class LabelingTool:
                 pass
         elif mode == 'access':
             # Show access & roads
-            content, btn = self.section_frames.get('7. Access & Roads', (None, None))
+            # Section is created as '6. Access & Roads' in the UI builder, so look that up
+            content, btn = self.section_frames.get('6. Access & Roads', (None, None))
             if content is not None:
                 content.pack(pady=1, fill='x')
                 btn.config(text='▾')
