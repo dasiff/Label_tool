@@ -1726,9 +1726,10 @@ class LabelingTool:
             self._running_in_background = False
 
     def _apply_manual_split(self):
-        """Apply manual split lines to segments - divides by multiple polylines."""
-        if len(self.manual_polylines) == 0 or self.segments is None:
-            return
+        """Thin wrapper calling implementation moved to labeling.core.manual_split.apply_manual_split
+        (implementation was copied verbatim into that module as part of the atomic move).
+        """
+        return manual_split_core.apply_manual_split(self)
         
         # Check if user selected a segment to split
         if not hasattr(self, 'splitting_segment_id') or self.splitting_segment_id is None:
