@@ -213,12 +213,44 @@ class LabelingTool:
             # Simple submit_frame stub with pack methods
             self.submit_frame = SimpleNamespace(pack=lambda *a, **k: None, pack_forget=lambda *a, **k: None)
             self.canvas = SimpleNamespace(get_tk_widget=lambda: None, draw=lambda: None, draw_idle=lambda: None)
+            # Minimal Axes stub so rendering helpers can call plot/scatter/set_title in headless tests
+            class _AxStub:
+                def __init__(self):
+                    self._artists = []
+                def plot(self, *args, **kwargs):
+                    class _Artist:
+                        def remove(self):
+                            return None
+                    art = _Artist(); self._artists.append(art); return (art,)
+                def scatter(self, *args, **kwargs):
+                    class _Artist:
+                        def remove(self):
+                            return None
+                    art = _Artist(); self._artists.append(art); return art
+                def add_patch(self, *a, **k):
+                    return None
+                def set_title(self, *a, **k):
+                    return None
+                def clear(self):
+                    return None
+                def axis(self, *a, **k):
+                    return None
+            self.ax = _AxStub()
+            self.fig = None
             # Minimal StringVar-like stubs for flags and controls used in logic
-            self.buffer_mode_var = SimpleNamespace(get=lambda: 'px')
-            self.segment_smoothing_var = SimpleNamespace(get=lambda: 'med')
-            self.shadow_robust_var = SimpleNamespace(get=lambda: False)
-            self.pre_smooth_var = SimpleNamespace(get=lambda: False)
-            self.auto_merge_var = SimpleNamespace(get=lambda: False)
+            class _StubVar:
+                def __init__(self, v=None):
+                    self._v = v
+                def get(self):
+                    return self._v
+                def set(self, v):
+                    self._v = v
+
+            self.buffer_mode_var = _StubVar('px')
+            self.segment_smoothing_var = _StubVar('med')
+            self.shadow_robust_var = _StubVar(False)
+            self.pre_smooth_var = _StubVar(False)
+            self.auto_merge_var = _StubVar(False)
             # Minimal UI placeholders used by headless tests
             self.manual_status = SimpleNamespace(config=lambda *a, **k: None)
             self.manual_btn = SimpleNamespace(config=lambda *a, **k: None)
@@ -226,6 +258,8 @@ class LabelingTool:
             self.undo_split_btn = SimpleNamespace(config=lambda *a, **k: None)
             self.submit_btn = SimpleNamespace(config=lambda *a, **k: None)
             self.boundary_status = SimpleNamespace(config=lambda *a, **k: None)
+            # Expose a simple stub for road painting mode so tests can toggle it
+            self.road_paint_var = _StubVar('public_road')
             # Do not attempt to auto-load preferences in headless mode
         
     def _build_ui(self):
@@ -554,18 +588,15 @@ class LabelingTool:
             self.save_btn = tk.Button(self.global_footer, text="✓ Save", command=self._submit_annotation, bg='#4CAF50', fg='white', font=("Arial", 10, "bold"))
             self.save_btn.pack(side=tk.RIGHT, padx=8, pady=6)
             # Hide the in-footer Save Draft button (keeps method intact for tests) to avoid duplicates
-            try:
-                self.save_draft_btn.pack_forget()
-            except Exception:
-                pass
+            # Keep the "Save Draft" button visible in the footer so users can save from the normal control area
+            # (previously we hid the footer copy in favor of a floating button).
         except Exception:
             pass
         # Floating save button in the top-right corner for guaranteed visibility
         try:
+            # Create a floating save button but do not place it by default; prefer footer save draft
             self.floating_save_btn = tk.Button(self.root, text="💾 Save", command=self._save_draft, bg='#E0E0E0', width=10)
-            # place slightly inset from the top-right so the button is not obscured by the image panel
-            self.floating_save_btn.place(relx=0.92, rely=0.02, anchor='ne')
-            self.floating_save_visible = True
+            self.floating_save_visible = False
         except Exception:
             self.floating_save_btn = None
             self.floating_save_visible = False
@@ -574,12 +605,12 @@ class LabelingTool:
             def _toggle_floating_save():
                 try:
                     if getattr(self, 'floating_save_visible', False):
-                        if self.floating_save_btn is not None:
+                                    if self.floating_save_btn is not None and self.floating_save_visible:
                             self.floating_save_btn.place_forget()
                         self.floating_save_visible = False
                         self.quick_floating_toggle.config(text='☆')
                     else:
-                        if self.floating_save_btn is not None:
+                        if self.floating_save_btn is not None and not self.floating_save_visible:
                             self.floating_save_btn.place(relx=0.98, rely=0.02, anchor='ne')
                         self.floating_save_visible = True
                         self.quick_floating_toggle.config(text='★')
@@ -1124,9 +1155,22 @@ class LabelingTool:
         self.retry_boundary_btn.config(state=tk.DISABLED)  # Disable retry button
         self.regenerate_boundary_btn.config(state=tk.DISABLED)  # Disable regenerate button
         self._generate_segments()
+        # Ensure boundary and segments (or fallback) are visible after approval
+        try:
+            self._draw_editable_boundary()
+        except Exception:
+            pass
         # Default to Segments mode after approval so user can label/split seamlessly
         try:
             self._set_mode('segments')
+            # If segmentation did not produce segments, show boundary and helper hint
+            if getattr(self, 'segments', None) is None:
+                try:
+                    self.ax.set_title("SEGMENT MODE: No segments generated yet — click 'Segment Myself' or '+ More'")
+                    self.seg_status.config(text="No segments generated — try 'Segment Myself' or adjust parameters")
+                    self.canvas.draw()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2698,22 +2742,13 @@ class LabelingTool:
                         self._update_display_with_highlight(seg_id_int)
                         return
                     else:
-                        # Treat like labeling: left-click to label, right-click to remove
-                        if event.button == 3:
-                            if seg_id_int in self.segment_labels:
-                                del self.segment_labels[seg_id_int]
-                                self._reset_submit_button()
-                                self._update_display()
-                                self._update_progress()
-                        elif event.button == 1:
-                            selected_class = self.class_var.get()
-                            self.segment_labels[seg_id_int] = selected_class
-                            self._reset_submit_button()
-                            self._update_display()
-                            self._update_progress()
-                            # Visual feedback
-                            self.last_clicked_segment = seg_id_int
-                            self.root.after(300, lambda: setattr(self, 'last_clicked_segment', None))
+                        # Avoid accidental labeling in Segments mode: instruct user to switch to Label mode
+                        self.manual_status.config(text="To apply a label, switch to Label mode (click 'Label')")
+                        try:
+                            self.ax.set_title("SEGMENT MODE: Click 'Label' to enter labeling mode for segments")
+                            self.canvas.draw()
+                        except Exception:
+                            pass
                         return
 
                 if segment_id > 0:
@@ -3578,6 +3613,17 @@ class LabelingTool:
                 btn.config(text='▸')
             except Exception:
                 pass
+        # Always keep the '1. Folders' section visible so users can choose input/output folders
+        try:
+            content_f, btn_f = self.section_frames.get('1. Folders', (None, None))
+            if content_f is not None:
+                content_f.pack(pady=1, fill='x')
+                try:
+                    btn_f.config(text='▾')
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Hide grouped frames
         try:
             self.boundary_tools_frame.pack_forget()
