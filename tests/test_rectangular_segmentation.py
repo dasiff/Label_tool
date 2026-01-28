@@ -32,7 +32,8 @@ def test_detect_simple_rectangle():
     gt = (50, 80, 350, 300)
     cv2.rectangle(img, (gt[0], gt[1]), (gt[2], gt[3]), (0, 0, 0), -1)
 
-    results = detect_rectangles_pyramid(img, scales=(0.25, 0.5, 1.0), min_area=1000)
+    # Use default scales which now include coarser levels
+    results = detect_rectangles_pyramid(img, min_area=1000)
     assert len(results) >= 1, "No rectangles detected on clean synthetic image"
 
     best = results[0]
@@ -56,7 +57,8 @@ def test_detect_occluded_rectangle():
         cy = gt[1] + rng.randint(0, 40)
         cv2.circle(img, (cx, cy), 18, (255, 255, 255), -1)
 
-    results = detect_rectangles_pyramid(img, scales=(0.25, 0.5, 1.0), min_area=800)
+    # Use default scales which include coarser levels to be robust to occlusion
+    results = detect_rectangles_pyramid(img, min_area=800)
     assert len(results) >= 1, "No rectangles detected on occluded rectangle image"
 
     best = results[0]

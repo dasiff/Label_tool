@@ -15,7 +15,7 @@ EXPERIMENTAL = True
 
 
 def detect_rectangles_pyramid(img_rgb: np.ndarray,
-                               scales: Tuple[float, ...] = (0.25, 0.5, 1.0),
+                               scales: Tuple[float, ...] = (0.0625, 0.125, 0.25, 0.5, 1.0),
                                min_area: int = 2000,
                                approx_eps_factor: float = 0.02) -> List[Dict[str, Any]]:
     """Detect rectangular candidates using multi-scale contour approximation.
@@ -63,8 +63,10 @@ def detect_rectangles_pyramid(img_rgb: np.ndarray,
                 cv2.fillPoly(box_mask, [np.round(box_pts).astype(int)], 255)
                 box_area = box_mask.sum() / 255
                 rect_score = float(area_full / max(1.0, box_area))
+                # Favor larger-area detections: penalize tiny contours relative to min_area
+                area_factor = min(1.0, float(area_full) / float(max(1, min_area)))
                 # Combine confidence
-                score *= rect_score
+                score *= rect_score * area_factor
                 results.append({"quad": quad.tolist(), "score": score, "area": float(area_full)})
             else:
                 # Consider min-area rectangle fallback for more robustness
@@ -84,13 +86,15 @@ def detect_rectangles_pyramid(img_rgb: np.ndarray,
                 cv2.fillPoly(box_mask_full, [np.round(box_pts_orig).astype(int)], 255)
                 box_area_full = box_mask_full.sum() / 255
                 rect_score = float(area_cnt_full / max(1.0, box_area_full))
+                # Favor larger-area detections: penalize tiny boxes relative to min_area
+                area_factor = min(1.0, float(box_area_full) / float(max(1, min_area)))
                 # Upscale box points to full resolution
-                results.append({"box": box_pts_orig.tolist(), "score": float(rect_score * 0.5), "area": float(box_area_full)})
+                results.append({"box": box_pts_orig.tolist(), "score": float(rect_score * 0.5 * area_factor), "area": float(box_area_full)})
 
     # Merge overlapping detections (simple NMS-ish by IoU on bounding boxes)
     merged = _nms_merge(results)
-    # Sort by score desc
-    merged.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    # Sort by combined confidence and area to favor large, well-supported candidates
+    merged.sort(key=lambda r: r.get("score", 0.0) * float(r.get("area", 1.0)), reverse=True)
     return merged
 
 
