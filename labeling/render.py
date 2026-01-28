@@ -143,9 +143,21 @@ def _update_display(self):
             chan[seg_mask] = chan[seg_mask] * (1 - alpha) + color[ch] * alpha
             display[:, :, ch] = chan
 
-    # Draw access overlays
+    # Dim area outside ROI+buffer to make ROI clearer (if boundary exists)
     try:
-        self._draw_access_segments()
+        if getattr(self, 'current_boundary', None) is not None:
+            self._compute_buffer_mask()
+            h, w = display.shape[:2]
+            roi_mask_full = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(roi_mask_full, [self.current_boundary.astype(np.int32)], 255)
+            roi_mask_bool = roi_mask_full > 0
+            buffer_mask_full = self.buffer_mask.astype(bool) if getattr(self, 'buffer_mask', None) is not None else np.zeros((h, w), dtype=bool)
+            roi_expanded = roi_mask_bool | buffer_mask_full
+            # Dim outside the expanded ROI
+            dim_mask = ~roi_expanded
+            if dim_mask.any():
+                mask3 = np.stack([dim_mask] * 3, axis=2)
+                display[mask3] = display[mask3] * 0.45
     except Exception:
         pass
 
@@ -156,6 +168,23 @@ def _update_display(self):
                 if len(line) >= 2:
                     pts = np.array(line, dtype=np.int32)
                     cv2.polylines(display, [pts], isClosed=False, color=(1.0, 0, 0), thickness=2)
+    except Exception:
+        pass
+
+    # Draw segment boundaries (thin overlay) to make segmentation edges visible even when unlabeled
+    try:
+        if getattr(self, 'segments', None) is not None:
+            seg_pad = np.pad(self.segments, 1, mode='constant', constant_values=0)
+            edge_h = (seg_pad[:-2, 1:-1] != seg_pad[2:, 1:-1])
+            edge_v = (seg_pad[1:-1, :-2] != seg_pad[1:-1, 2:])
+            edges = edge_h | edge_v
+            if edges.any():
+                # Blend yellow onto edge pixels to make them visible
+                edge_idx = np.where(edges)
+                for ch in range(3):
+                    c = display[:, :, ch]
+                    c[edge_idx] = c[edge_idx] * 0.2 + (1.0 if ch in (0,1) else 0.0) * 0.8
+                    display[:, :, ch] = c
     except Exception:
         pass
 
@@ -240,8 +269,8 @@ def _update_display_with_highlight(self, highlight_seg_id):
     # Set title
     if self.boundary_access_mode or self.mode == 'access':
         self.ax.set_title("BOUNDARY ACCESS MODE: Click two points on boundary to add access segment")
-    elif self.manual_mode:
-        self.ax.set_title("SPLIT MODE: Click segment, draw lines (Esc=reselect, Space=new line, Enter=apply)")
+    elif getattr(self, 'splitting_segment_id', None) is not None or len(self.manual_line_points) > 0:
+        self.ax.set_title("SPLIT MODE: Draw lines (Esc=reselect, Space=new line, Enter=apply)")
     else:
         self.ax.set_title("LABEL MODE: Click segment to label (right-click to remove)")
 

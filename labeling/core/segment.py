@@ -99,6 +99,12 @@ def _generate_segments(self):
     else:
         scale_factor = 0.5
         max_attempts_local = 6
+    # If the user requested a very high target_segments, favor a higher-resolution
+    # feature scale so that small texture details are preserved and segmentation
+    # can produce many regions (avoids flaky low-count outputs on small previews).
+    if getattr(self, 'target_segments', 0) > 200:
+        scale_factor = max(scale_factor, 0.5)
+        max_attempts_local = max(max_attempts_local, 6)
     small_h, small_w = int(h * scale_factor), int(w * scale_factor)
     rgb_small = cv2.resize(rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
 
@@ -309,6 +315,13 @@ def _generate_segments(self):
     self.segments = segments
     self.n_segments = segments.max()  # Actual segment count
 
+    # --- New: prune, simplify, and optionally convexify components for cleaner shapes ---
+    try:
+        # call module-level helper to prune & simplify
+        _prune_and_simplify_segments(self, level=self.segment_smoothing_level)
+    except Exception as e:
+        print('Warning: _prune_and_simplify_segments failed', e)
+
     # Enforce boundary as hard split to ensure no segment crosses the boundary
     try:
         self._enforce_boundary_split()
@@ -332,7 +345,10 @@ def _generate_segments(self):
     # Display segments
     self._update_display()
     
-    self.seg_status.config(text=f"✓ {self.n_segments} segments (target: {self.target_segments})")
+    try:
+        self.set_seg_status(f"✓ {self.n_segments} segments (target: {self.target_segments})")
+    except Exception:
+        pass
     self._update_progress()
 
 
@@ -429,6 +445,89 @@ def _postprocess_merge(self, target:int=None, min_size:int=None, boundary_grad_t
     - min_size: size below which a region is considered 'small' and eligible to be merged.
     - boundary_grad_thresh: mean gradient magnitude threshold; don't merge across strong boundaries.
     """
+
+
+def _prune_and_simplify_segments(self, level='med', small_area_factor: float = 0.25, convexity_thresh: float = 0.55):
+    """Prune very small spurs, apply contour simplification, and optionally convexify very non-compact regions.
+
+    - level: smoothing level inherited from UI ('off','low','med','high')
+    - small_area_factor: fraction of min_segment_px below which regions are considered tiny and eligible for merging
+    - convexity_thresh: solidity threshold; if area/convex_area < convexity_thresh, replace with convex hull for simplicity
+    """
+    if self.segments is None:
+        return
+    try:
+        seg = self.segments.copy()
+        h, w = seg.shape
+        new_seg = np.zeros_like(seg, dtype=np.int32)
+        new_id = 1
+        min_keep = max(1, int(getattr(self, 'min_segment_px', 100) * small_area_factor))
+        # kernel sizes by level
+        close_map = {'off': 1, 'low': 3, 'med': 5, 'high': 9}
+        open_map = {'off': 1, 'low': 3, 'med': 5, 'high': 7}
+        k_close = close_map.get(level, 5)
+        k_open = open_map.get(level, 5)
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_open, k_open))
+
+        for uid in sorted([int(x) for x in np.unique(seg) if x != 0]):
+            mask = (seg == uid)
+            area = int(mask.sum())
+            if area == 0:
+                continue
+            mask_u8 = (mask.astype('uint8') * 255)
+            # Morphological closing to fill small indentations and remove jagged teeth
+            try:
+                closed = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel_close)
+            except Exception:
+                closed = mask_u8
+            # Morphological opening to remove thin spurs
+            try:
+                opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open)
+            except Exception:
+                opened = closed
+            # Convert to boolean and skip tiny islands for now (they will be merged later)
+            opened_bool = opened.astype(bool) & mask
+            if opened_bool.sum() == 0:
+                # if everything removed, fall back to original mask
+                opened_bool = mask
+            # Simplify contour
+            simp = self._simplify_component_mask(opened_bool, level=level)
+            # If simplification reduces area too much, fallback to opened_bool
+            if simp.sum() < max(1, int(area * 0.2)):
+                simp = opened_bool
+            # Optionally convexify regions that are highly non-compact
+            try:
+                contours, _ = cv2.findContours((simp.astype('uint8')*255).astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                if contours:
+                    c = max(contours, key=lambda x: cv2.contourArea(x))
+                    area_c = max(1.0, cv2.contourArea(c))
+                    hull = cv2.convexHull(c)
+                    hull_mask = np.zeros_like(simp, dtype=np.uint8)
+                    cv2.fillPoly(hull_mask, [hull], 255)
+                    hull_area = float(hull_mask.sum())
+                    solidity = float(area_c) / max(1.0, hull_area)
+                    if solidity < convexity_thresh and hull_area > 0:
+                        # Use convex hull to simplify complex shapes
+                        simp = (hull_mask > 0)
+            except Exception:
+                pass
+            # If region still tiny, keep for now and let merging handle it later
+            if simp.sum() > 0:
+                new_seg[simp] = new_id
+                new_id += 1
+        # Reassign ids
+        if new_seg.max() > 0:
+            self.segments = new_seg
+            self.n_segments = int(self.segments.max())
+            # Merge remaining tiny regions using existing postprocess merge helper
+            try:
+                self._postprocess_merge(min_size=min_keep)
+            except Exception:
+                pass
+    except Exception as e:
+        print('Error in _prune_and_simplify_segments:', e)
+        return
     if self.segments is None:
         return
     seg = self.segments.copy()

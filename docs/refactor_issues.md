@@ -12,7 +12,7 @@ Failures observed when moving `_simplify_component_mask` and `_compute_buffer_ma
    - Error: UnboundLocalError in `_submit_annotation` (same as above).
 
 3. tests/test_access_road_labeling.py::test_shortcuts_toggle_and_escape
-   - Error: AttributeError in `_toggle_manual_mode`: `manual_btn` missing in headless stub.
+   - Note: `_toggle_manual_mode` and the persistent `manual_mode` flag were deprecated/removed in favor of click-to-select splitting; tests were updated accordingly to avoid depending on missing UI stubs.
 
 Notes:
 - These are logged for later resolution. Proceeding with planned atomic moves per instruction.

@@ -1,0 +1,97 @@
+Labeling Tool — System-level Overview
+
+Purpose:
+- Interactive labeling tool for parcel/parking segmentation and annotation.
+- Monolithic implementation in `scripts/labeling_tool.py` used for UI, segmentation, manual editing, labeling, and file I/O.
+
+Entry point:
+- Class: LabelingTool in `scripts/labeling_tool.py`.
+- Run: instantiate and call `.run()` or execute `python scripts/labeling_tool.py`.
+- Tests create `LabelingTool()` in headless mode (stubs) for logic tests.
+
+UI layer:
+- Built with Tkinter (controls) + Matplotlib (image canvas via FigureCanvasTkAgg).
+- Main layout:
+  - Left panel: folders, navigation, mode buttons (boundary / segments / label / access), segmentation options, class selection, save.
+  - Right panel: image canvas and overlays.
+  - Footer/global Save bar: persistent Save button; plus optional floating save button for guaranteed visibility.
+- Controls: boundary approval (Good/Bad), Segment Myself, Split Mode, smoothing, fast preview, buffer, Save Draft.
+
+Core state (important variables):
+- Image/I-O: `images_folder`, `output_folder`, `image_files`, `current_idx`.
+- Image/boundary: `current_image`, `clean_image`, `original_boundary`, `current_boundary`, transform (`boundary_dx/dy/theta`).
+- Segmentation/labels: `segments` (np.ndarray of per-pixel segment ids), `n_segments`, `target_segments`, `segment_labels` (dict mapping id->class), `min_segment_px`.
+- Manual editing: `manual_polylines`, `manual_line_points`, `splitting_segment_id`, `split_history` (note: legacy `manual_mode` and `_toggle_manual_mode` removed; segment selection is click-to-select + Apply)
+- Buffers/roads: `buffer_mask`, `road_mask`.
+- Flags: `boundary_approved`, `has_unsaved_changes`.
+
+Segmentation & detection:
+- Boundary detection delegates to `app.core.boundary.estimate_boundary_from_overlay()` (HSV red detection, convex hull, simplification, confidence/warnings).
+- Segment generation in `_generate_segments()`:
+  - Build features (CLAHE LAB, chromaticity, gradient), optionally shadow-robust variants.
+  - Downsample for fast preview, call `skimage.segmentation.felzenszwalb()`.
+  - Upscale, mask to ROI + buffer, morphological close/open, extract connected components and simplify polygons.
+  - Optional auto-merge (`_postprocess_merge`) controlled via UI toggle.
+
+Manual splitting & editing:
+- `Segment Myself` seeds a single region; users draw polylines for splits.
+- `_apply_manual_split()` handles closed-loop (create inner segment) and open lines (snap endpoints to nearest edge or nearby endpoint); supports seed-flood fallback and global cuts.
+- `_apply_manual_split_background_safe()` runs closed-loop work in background thread and schedules UI updates on main thread.
+
+Rendering & visualization:
+- `_update_display()` draws base image, labeled overlays, segment numbers, and boundaries.
+- `_update_display_with_highlight()` highlights a segment for manual split.
+- Helpers: `_draw_editable_boundary()`, `_draw_access_segments()`.
+- Smoothing: `_simplify_component_mask()` uses contour simplification and Chaikin smoothing.
+- Coalesced redraw to limit GUI thrashing via `_schedule_coalesced_draw()`.
+
+Event handling:
+- Mouse/keyboard handlers on canvas:
+  - `_on_click()`: boundary drag, segment selection, labeling, manual splitting point capture, access-mode interactions.
+  - `_on_motion()`, `_on_release()`: handle dragging and painting.
+  - `_on_key_press()`: shortcuts: Enter (apply), Space (new line), Esc (cancel), S (submit), M (toggle manual), B (access), etc.
+- Mode management via `_set_mode()` and `_update_title_for_mode()`.
+
+File I/O & persistence:
+- Drafts: `_save_draft()` writes draft JSON + `*_segments.npy` safely using temp files and atomic replace/copy fallbacks (Windows-safe). Drafts stored under `data/drafts` by default.
+- Submit/Final: `_submit_annotation()` writes final labels JSON, `*_segments.npy`, `*_segmented.png`, masks (interior, road) to `output_folder`.
+- Preferences: `_save_folder_preferences()` & `_load_folder_preferences()` (data/.labeling_tool_config.json).
+- Debug images saved in `debug/` next to outputs.
+
+Concurrency & reliability:
+- Background threads used for heavy tasks (split worker, Save Draft in GUI mode) with synchronous fallback in headless tests.
+- Atomic file writes, retries and careful temp file handling were added to address Windows file-lock issues.
+
+Testing & headless support:
+- Headless stubs for Tk attributes enable unit tests to exercise logic without GUI.
+- Tests cover boundary detection, manual splits, simplification, save-draft behavior, segmentation granularity, etc.
+- Some test hooks present (e.g., `_last_snap_info` for verifying snapping decisions).
+
+Integration & extension points:
+- `app.core.boundary` is the explicit boundary-detection dependency; segmentation logic is local but could be replaced by ML model in Milestone 2.
+- Encouraged next steps for a simplified second tool: separate UI from core logic, expose headless controller API, and implement simpler UI with only the required subset of features.
+
+Plain-English module diagram (textual):
+- LabelingTool (main controller & UI)
+  - Entry → instantiate LabelingTool() and call `.run()`
+  - UI Layer (Tkinter + Matplotlib)
+    - Left Panel: controls (modes, options, save)
+    - Right Panel: image canvas and overlays
+    - Footer: Save button
+  - Image/Boundary subsystem
+    - loads images, runs red-overlay detection, maintains boundary state
+  - Segmentation subsystem
+    - builds features, calls felzenszwalb, post-processes segments
+  - Manual edit subsystem
+    - handles polylines, snapping, closed-loop or open-line splits
+  - Rendering subsystem
+    - draws image, overlays, labels and highlights
+  - Persistence subsystem
+    - Save Draft atomic writes, Submit final outputs
+  - Event & background workers
+    - mouse/keyboard handlers, background split/save threads
+  - Tests & headless hooks
+    - enable CI and logic-only verification
+
+Notes:
+- This file (`scripts/labeling_tool.py`) is the frozen reference snapshot for the tool's behavior and should be used as the authoritative guide while creating a simpler second tool.

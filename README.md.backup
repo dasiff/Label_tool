@@ -1,0 +1,196 @@
+# Parking Spaces Feasibility API
+
+FastAPI backend for analyzing parking space feasibility from aerial imagery.
+
+## Quick Start
+
+### Local Development (Recommended for Testing)
+
+```bash
+# Create virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1          # Windows PowerShell
+source .venv/bin/activate             # Linux/Mac
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run server with auto-reload
+uvicorn app.main:app --reload --port 8000
+```
+
+API will be available at:
+- **API**: http://localhost:8000
+- **Docs**: http://localhost:8000/docs (interactive Swagger UI)
+- **ReDoc**: http://localhost:8000/redoc
+
+### Docker (Optional)
+
+If you have Docker Desktop installed:
+
+```bash
+docker-compose up --build
+```
+
+API at http://localhost:8000
+
+> **Note**: If `docker-compose` is not found, use local development instead (see above).
+
+## Testing
+
+### Option 1: Run Unit Tests (Fastest - No Server Needed)
+
+```bash
+# Activate venv first
+.\.venv\Scripts\Activate.ps1     # Windows
+source .venv/bin/activate         # Linux/Mac
+
+# Run all tests
+pytest tests/ -v
+
+# Run specific test
+pytest tests/test_api.py::test_analyze_basic -v
+
+# With coverage
+pytest tests/ --cov=app --cov-report=html
+```
+
+**Expected output:**
+```
+tests/test_api.py::test_healthz PASSED
+tests/test_api.py::test_analyze_basic PASSED
+tests/test_api.py::test_analyze_with_scale PASSED
+tests/test_api.py::test_analyze_annotated_image_is_base64 PASSED
+
+4 passed in 11.49s
+```
+
+### Option 2: Start Live Server + Test Manually
+
+**Terminal 1: Start the server**
+```bash
+.\.venv\Scripts\Activate.ps1
+uvicorn app.main:app --reload --port 8000
+```
+
+**Terminal 2: Test endpoints**
+
+Health check:
+```bash
+curl http://localhost:8000/healthz
+```
+
+Analyze with test image:
+```bash
+# Create a simple test image first, or use your own
+curl -X POST "http://localhost:8000/analyze" \
+  -F "image=@C:\path\to\test.png"
+```
+
+### Option 3: Interactive Swagger UI (Best for Manual Testing)
+
+1. **Start server** (Terminal 1, see above)
+2. **Open browser**: http://localhost:8000/docs
+3. **Test `/analyze` endpoint**:
+   - Click "Try it out"
+   - Click "Choose File" and select a PNG/JPEG image
+   - (Optional) Add `scale_m_per_px` parameter (e.g., `0.5`)
+   - Click "Execute"
+   - View the response JSON and decode the base64 image
+
+### Decode Annotated Image (Python)
+
+After getting a response, decode the annotated image:
+
+```python
+import base64
+import json
+from PIL import Image
+import io
+
+# Assuming you have the JSON response
+response_json = {...}  # from /analyze endpoint
+b64_png = response_json["annotated_image_base64_png"]
+
+# Decode and save
+png_bytes = base64.b64decode(b64_png)
+img = Image.open(io.BytesIO(png_bytes))
+img.save("annotated.png")
+img.show()  # Display on Windows
+```
+
+## Project Structure
+
+```
+app/
+  main.py                    # FastAPI app + /analyze route
+  api/
+    schemas.py               # Pydantic request/response models
+  core/
+    boundary.py              # estimate_boundary_from_overlay()
+    scale.py                 # choose_scale()
+    render.py                # draw_polygon()
+    utils.py                 # Image codecs (PIL ↔ OpenCV ↔ base64)
+tests/
+  test_api.py                # Integration tests
+scripts/
+  labelstudio/
+    README.md                # Label Studio setup for training data
+    export_to_masks.py       # Convert annotations to masks
+models/
+  README.md                  # Trained model storage (Milestone 2+)
+Dockerfile
+docker-compose.yml
+requirements.txt
+```
+
+## Milestones
+
+### Milestone 1 (Current)
+- ✅ API skeleton with Pydantic schemas
+- ✅ Image upload & codec pipeline (PIL ↔ OpenCV ↔ base64)
+- ✅ Placeholder boundary detection (inset rectangle)
+- ✅ Scale acceptance (user-provided or None)
+- ✅ Polygon rendering overlay
+- ✅ End-to-end tests
+
+### Milestone 2+ (Future)
+- HSV thresholding for overlay line detection
+- Contour extraction & polygon snap-to-grid
+- ML-based boundary detection (UNet)
+- Automatic scale estimation from image overlays
+- Model training pipeline
+
+## Debugging
+
+### Image Decode Fails
+- Check MIME type (PNG, JPEG supported)
+- Verify file is a valid image
+
+### Polygon Not Visible in Annotated Image
+- Confirm polygon coordinates are within image bounds
+- Check rendered color (default: yellow 0,255,255 in BGR)
+
+### Scale is Null
+- Verify `scale_m_per_px` parameter passed to `/analyze`
+- Current placeholder always returns None if not provided (by design)
+
+### Docker Build Fails
+- Ensure `requirements.txt` is in root directory
+- Check Python 3.11 compatibility on your system
+- Run `docker-compose build --no-cache` to force rebuild
+
+## Next Steps
+
+1. **Label Studio Setup** (data annotation): See `scripts/labelstudio/README.md`
+2. **Implement HSV Boundary Detection**: Replace placeholder in `app/core/boundary.py`
+3. **Train ML Model**: Use exported masks from Label Studio (Milestone 2+)
+4. **Optimize Inference**: Profile image processing pipeline
+5. **Deploy**: Push Docker image to container registry
+
+## References
+
+- [FastAPI Docs](https://fastapi.tiangolo.com/)
+- [OpenCV Python](https://docs.opencv.org/master/d0/de3/cv_2python_2python_8html)
+- [Pydantic](https://docs.pydantic.dev/)
+- [Label Studio](https://labelstud.io/)
