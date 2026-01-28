@@ -17,7 +17,8 @@ EXPERIMENTAL = True
 def detect_rectangles_pyramid(img_rgb: np.ndarray,
                                scales: Tuple[float, ...] = (0.0625, 0.125, 0.25, 0.5, 1.0),
                                min_area: int = 2000,
-                               approx_eps_factor: float = 0.02) -> List[Dict[str, Any]]:
+                               approx_eps_factor: float = 0.02,
+                               use_hough: bool = True) -> List[Dict[str, Any]]:
     """Detect rectangular candidates using multi-scale contour approximation.
 
     Returns a list of dicts with at least the keys:
@@ -39,6 +40,13 @@ def detect_rectangles_pyramid(img_rgb: np.ndarray,
         # Blur to reduce small occluders (trees, cars)
         blurred = cv2.GaussianBlur(small, (5, 5), 0)
         edges = cv2.Canny(blurred, 50, 150)
+
+        # Optionally run a coarse Hough-based detection at the coarsest scales to recover
+        # long straight edges that survive occlusion (trees/cars). This is intentionally
+        # conservative and only used on coarse scales to avoid noise.
+        if use_hough and scale <= 0.125:
+            hough_entries = _hough_rectangles_from_edges(edges, scale, h0, w0, min_area=min_area)
+            results.extend(hough_entries)
 
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
@@ -111,6 +119,100 @@ def _order_quad_clockwise(pts: np.ndarray) -> np.ndarray:
     min_idx = np.argmin(np.sum(pts_ordered, axis=1))
     pts_rot = np.roll(pts_ordered, -min_idx, axis=0)
     return pts_rot
+
+
+# --- Hough / RANSAC helpers (coarse-scale) ---
+
+def _line_length(l: Tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = l
+    return float(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+
+
+def _intersect_lines(l1, l2):
+    """Intersect two infinite lines each defined by endpoints (x1,y1,x2,y2).
+    Returns (x,y) float or None if parallel.
+    """
+    x1, y1, x2, y2 = l1
+    x3, y3, x4, y4 = l2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+    px = ((x1*y2 - y1*x2) * (x3 - x4) - (x1 - x2) * (x3*y4 - y3*x4)) / denom
+    py = ((x1*y2 - y1*x2) * (y3 - y4) - (y1 - y2) * (x3*y4 - y3*x4)) / denom
+    return (px, py)
+
+
+def _hough_rectangles_from_edges(edges_small: np.ndarray, scale: float, h0:int, w0:int, min_area:int=2000) -> List[Dict[str, Any]]:
+    """Run Probabilistic Hough on a small-scale edge map and form rectangle hypotheses.
+
+    Returns entries with 'box' points in original-image coords and heuristic 'score'.
+    """
+    h_s, w_s = edges_small.shape[:2]
+    min_len = max(8, int(min(h_s, w_s) * 0.35))
+    # Tune Hough parameters for coarse detection
+    lines = cv2.HoughLinesP(edges_small, rho=1, theta=np.pi/180, threshold=40, minLineLength=min_len, maxLineGap=20)
+    if lines is None:
+        return []
+    lines = [tuple(l[0]) for l in lines]
+    # Filter and sort by length
+    lines = sorted(lines, key=_line_length, reverse=True)
+
+    # Classify lines into angle buckets (near-horizontal and near-vertical)
+    horiz = []
+    vert = []
+    for l in lines:
+        x1,y1,x2,y2 = l
+        ang = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))) % 180
+        if ang > 90:
+            ang = 180 - ang
+        if ang <= 20:
+            horiz.append(l)
+        elif ang >= 70:
+            vert.append(l)
+    # If insufficient lines, abort
+    if len(horiz) < 2 or len(vert) < 2:
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    # Limit to top few long lines to avoid combinatorial blowup
+    top_h = horiz[:4]
+    top_v = vert[:4]
+
+    for i in range(len(top_h)):
+        for j in range(i+1, len(top_h)):
+            lh1, lh2 = top_h[i], top_h[j]
+            for a in range(len(top_v)):
+                for b in range(a+1, len(top_v)):
+                    lv1, lv2 = top_v[a], top_v[b]
+                    # Intersect to make 4 corners
+                    p00 = _intersect_lines(lh1, lv1)
+                    p10 = _intersect_lines(lh2, lv1)
+                    p11 = _intersect_lines(lh2, lv2)
+                    p01 = _intersect_lines(lh1, lv2)
+                    if None in (p00, p10, p11, p01):
+                        continue
+                    pts = np.array([p00, p10, p11, p01], dtype=float)
+                    # Scale points to original image coordinates
+                    pts_orig = pts / scale
+                    # Check bounding box validity
+                    x1, y1 = pts_orig[:,0].min(), pts_orig[:,1].min()
+                    x2, y2 = pts_orig[:,0].max(), pts_orig[:,1].max()
+                    if x2 - x1 < 4 or y2 - y1 < 4:
+                        continue
+                    box_area = (x2 - x1) * (y2 - y1)
+                    if box_area < min_area:
+                        continue
+                    # Compute rectangularity: fill polygon area vs bbox area
+                    mask = np.zeros((h0, w0), dtype=np.uint8)
+                    cv2.fillPoly(mask, [np.round(pts_orig).astype(int)], 255)
+                    area_full = mask.sum() / 255
+                    rect_score = float(area_full / max(1.0, box_area))
+                    # Line support: average fraction of line lengths relative to small dim
+                    len_avg = ( _line_length(lh1) + _line_length(lh2) + _line_length(lv1) + _line_length(lv2) ) / 4.0
+                    len_factor = min(1.0, len_avg / max(1, min(h_s, w_s)))
+                    score = rect_score * (0.5 + 0.5 * len_factor)
+                    candidates.append({"box": pts_orig.tolist(), "score": float(score), "area": float(box_area)})
+    return candidates
 
 
 def _rect_from_entry(entry: Dict[str, Any]) -> np.ndarray:
