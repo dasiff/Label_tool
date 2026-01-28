@@ -17,10 +17,14 @@ def test_simplify_reduces_vertices():
     mask = make_jagged_rectangle()
     # Convert to boolean
     mask_bool = mask.astype(bool)
-    simp = _simplify_component_mask(None, mask_bool, level='med')
+    # Create a minimal dummy self object with required attributes
+    class Dummy:
+        SMOOTHING_EPS = {'off': 0.0, 'low': 0.002, 'med': 0.01, 'high': 0.02}
+    dummy = Dummy()
+    simp = _simplify_component_mask(dummy, mask_bool, level='med')
     # Ensure simplified mask is not empty
     assert simp.sum() > 0
-    # Check that simplified contor has fewer points than original
+    # Check that simplified contour has fewer points than original
     contours_orig, _ = cv2.findContours((mask_bool.astype('uint8')*255), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     contours_simp, _ = cv2.findContours((simp.astype('uint8')*255), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if contours_orig:
