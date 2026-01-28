@@ -1399,7 +1399,7 @@ class LabelingTool:
         self.segment_labels = {}
         # No longer entering a persistent manual mode; clear any splitting selection
         self.splitting_segment_id = None
-        self.manual_status.config(text="Segments generated — click a segment to split or press 'Label' to label")
+        self.set_manual_status("Segments generated — click a segment to split or press 'Label' to label")
         self._update_display()
         self._update_progress()
 
@@ -1464,6 +1464,87 @@ class LabelingTool:
             except:
                 pass
         self.manual_line_artists.clear()
+
+    # UI helper wrappers (thread-safe)
+    def set_manual_status(self, text: str):
+        """Set the manual status text in a thread-safe way."""
+        def _set():
+            try:
+                self.manual_status.config(text=text)
+            except Exception:
+                pass
+        try:
+            if not getattr(self, '_tk_available', True):
+                _set()
+            else:
+                self.root.after(0, _set)
+        except Exception:
+            _set()
+
+    def set_finalize_enabled(self, enabled: bool):
+        """Enable or disable the finalize (Apply) button in a thread-safe way."""
+        def _set():
+            try:
+                state = tk.NORMAL if enabled else tk.DISABLED
+                self.finalize_btn.config(state=state)
+            except Exception:
+                pass
+        try:
+            if not getattr(self, '_tk_available', True):
+                _set()
+            else:
+                self.root.after(0, _set)
+        except Exception:
+            _set()
+
+    def set_undo_enabled(self, enabled: bool):
+        """Enable or disable the undo split button."""
+        def _set():
+            try:
+                state = tk.NORMAL if enabled else tk.DISABLED
+                self.undo_split_btn.config(state=state)
+            except Exception:
+                pass
+        try:
+            if not getattr(self, '_tk_available', True):
+                _set()
+            else:
+                self.root.after(0, _set)
+        except Exception:
+            _set()
+
+    def set_submit_state(self, text: str = None, bg: str = None):
+        """Update submit button's text/background in a thread-safe way."""
+        def _set():
+            try:
+                if text is not None:
+                    self.submit_btn.config(text=text)
+                if bg is not None:
+                    self.submit_btn.config(bg=bg)
+            except Exception:
+                pass
+        try:
+            if not getattr(self, '_tk_available', True):
+                _set()
+            else:
+                self.root.after(0, _set)
+        except Exception:
+            _set()
+
+    def set_seg_status(self, text: str):
+        """Set segmentation status text in a thread-safe way."""
+        def _set():
+            try:
+                self.seg_status.config(text=text)
+            except Exception:
+                pass
+        try:
+            if not getattr(self, '_tk_available', True):
+                _set()
+            else:
+                self.root.after(0, _set)
+        except Exception:
+            _set()
     
     def _reset_submit_button(self):
         """Reset submit button to unsaved state."""
@@ -1505,7 +1586,7 @@ class LabelingTool:
         
         # Disable undo button if no more history
         if not self.split_history:
-            self.undo_split_btn.config(state=tk.DISABLED)
+            self.set_undo_enabled(False)
         
         # Clear any labels for segments that no longer exist
         valid_seg_ids = set(range(1, self.n_segments + 1))
@@ -1518,35 +1599,60 @@ class LabelingTool:
     
     def _finalize_manual_split(self):
         """Finalize and apply the manual split."""
+        # DEBUG: show current manual points/polylines when testing
+        try:
+            print(f"DEBUG: _finalize_manual_split called - manual_line_points={self.manual_line_points}, manual_polylines={self.manual_polylines}")
+        except Exception:
+            pass
         # Add current polyline to completed list if it has points
         if len(self.manual_line_points) >= 2:
             self.manual_polylines.append(self.manual_line_points.copy())
             self.manual_line_points.clear()
+        try:
+            print(f"DEBUG: after append - manual_polylines={self.manual_polylines}, manual_line_points={self.manual_line_points}")
+        except Exception:
+            pass
         
         if len(self.manual_polylines) == 0:
-            self.manual_status.config(text="Need at least 2 points!")
+            self.set_manual_status("Need at least 2 points!")
             messagebox.showwarning("Not enough points", "Click at least 2 points before finalizing")
             return
 
         # Update UI and then run split in background on GUI-enabled environments to keep UI responsive
-        self.manual_status.config(text="Applying split...")
+        self.set_manual_status("Applying split...")
         try:
             if self._tk_available:
                 # Disable buttons to prevent re-entry while processing
                 try:
-                    self.finalize_btn.config(state=tk.DISABLED)
+                    self.set_finalize_enabled(False)
+                except Exception:
+                    pass
+                try:
+                    print("DEBUG: _finalize_manual_split starting background split thread (GUI mode)")
                 except Exception:
                     pass
                 t = threading.Thread(target=self._apply_manual_split_background_safe, daemon=True)
                 t.start()
+                try:
+                    print("DEBUG: _finalize_manual_split background thread started")
+                except Exception:
+                    pass
             else:
                 # Headless/test mode - run synchronously for tests
+                try:
+                    print("DEBUG: _finalize_manual_split running synchronously (headless/test)")
+                except Exception:
+                    pass
                 self._apply_manual_split()
-                self.manual_status.config(text="Split applied! Draw another or toggle off")
+                self.set_manual_status("Split applied! Draw another or toggle off")
         except Exception:
             # Fallback to synchronous call on unexpected errors
+            try:
+                print("DEBUG: _finalize_manual_split encountered exception, falling back to synchronous")
+            except Exception:
+                pass
             self._apply_manual_split()
-            self.manual_status.config(text="Split applied! Draw another or toggle off")
+            self.set_manual_status("Split applied! Draw another or toggle off")
     
     def _simplify_component_mask(self, mask, level='med'):
         """Thin wrapper calling implementation moved to labeling.core.segment._simplify_component_mask
@@ -1641,14 +1747,14 @@ class LabelingTool:
         
         # Check if user selected a segment to split
         if not hasattr(self, 'splitting_segment_id') or self.splitting_segment_id is None:
-            self.manual_status.config(text="No segment selected! Click a segment first")
+            self.set_manual_status("No segment selected! Click a segment first")
             return
         
         # Save current state for undo
         self.split_history.append(self.segments.copy())
         if len(self.split_history) > 10:  # Limit history to last 10 splits
             self.split_history.pop(0)
-        self.undo_split_btn.config(state=tk.NORMAL)
+        self.set_undo_enabled(True)
         
         h, w = self.segments.shape
         print(f"\n=== MANUAL SPLIT DEBUG ===")
@@ -1696,7 +1802,7 @@ class LabelingTool:
 
         if len(edge_coords) == 0:
             print(f"  → No edges found - segment too small")
-            self.manual_status.config(text="Segment too small to split!")
+            self.set_manual_status("Segment too small to split!")
             return
         
         # Create combined line mask from all polylines
@@ -2132,7 +2238,7 @@ class LabelingTool:
                         pass
                     if touched_success == 0:
                         print(f"  → Split failed: line didn't divide segment into 2 parts (found {num_regions} regions)")
-                        self.manual_status.config(text=f"Line didn't split segment (only {num_regions} region)")
+                        self.set_manual_status(f"Line didn't split segment (only {num_regions} region)")
                         return
         else:
             # Get the two largest regions (in case line created small debris)
@@ -2164,7 +2270,7 @@ class LabelingTool:
                 # Keep the larger side selected so user can continue making cuts without re-selecting
                 # Default to selecting the newly created segment to allow quick subsequent cuts on the other side
                 self.splitting_segment_id = new_seg_id
-                self.manual_status.config(text=f"Segment {self.splitting_segment_id} selected - draw another line to split further")
+                self.set_manual_status(f"Segment {self.splitting_segment_id} selected - draw another line to split further")
                 # Highlight the selected segment immediately
                 try:
                     self._update_display_with_highlight(self.splitting_segment_id)
@@ -2179,7 +2285,7 @@ class LabelingTool:
                 segments_added = 0
                 # Keep selection cleared on failure
                 self.splitting_segment_id = None
-                self.manual_status.config(text="Split failed: one side too small; redraw closer to midline")
+                self.set_manual_status("Split failed: one side too small; redraw closer to midline")
         
         # Save debug image
         if self.images_folder:
@@ -2333,13 +2439,13 @@ class LabelingTool:
         """
         self.road_mode_active = not getattr(self, 'road_mode_active', False)
         if self.road_mode_active:
-            self.manual_status.config(text="Road painting active (use mouse to paint; feature limited in UI)")
+            self.set_manual_status("Road painting active (use mouse to paint; feature limited in UI)")
             try:
                 self.road_mode_btn.config(bg='#90EE90')
             except Exception:
                 pass
         else:
-            self.manual_status.config(text="Road painting deactivated")
+            self.set_manual_status("Road painting deactivated")
             try:
                 self.road_mode_btn.config(bg='#E0FFFF')
             except Exception:
@@ -2393,7 +2499,7 @@ class LabelingTool:
         px = (int(round(proj[0])), int(round(proj[1])))
         if self.access_click_start is None:
             self.access_click_start = {'frac': frac, 'pt': px}
-            self.manual_status.config(text="First point set. Click second point to complete access segment.")
+            self.set_manual_status("First point set. Click second point to complete access segment.")
             self._draw_access_segments()
             return
         else:
@@ -2410,7 +2516,7 @@ class LabelingTool:
             d = (end_frac - start_frac) % 1.0
             # If points are effectively the same, treat as accidental and ask user to retry
             if abs(d) < 1e-3 or abs(d - 1.0) < 1e-3:
-                self.manual_status.config(text="Points too close or identical - try selecting a different second point.")
+                self.set_manual_status("Points too close or identical - try selecting a different second point.")
                 self.access_click_start = None
                 self._draw_access_segments()
                 return
@@ -2425,7 +2531,7 @@ class LabelingTool:
             self.boundary_access_segments.append(seg)
             self.access_click_start = None
             self._reset_submit_button()
-            self.manual_status.config(text="Access segment added.")
+            self.set_manual_status("Access segment added.")
             self._draw_access_segments()
             self._update_display()
             return
@@ -2510,6 +2616,26 @@ class LabelingTool:
         return render_core._draw_editable_boundary(self)
 
     
+    def _is_point_near_segment(self, x_int: int, y_int: int, seg_id: int, max_dist: int = 10) -> bool:
+        """Return True if any pixel within max_dist of (x_int,y_int) belongs to seg_id.
+
+        This is a lightweight, local check used to decide whether a click should be
+        interpreted as adding a split point for the currently selected segment
+        (if the click is near it) or as selecting a different segment (if far).
+        """
+        if self.segments is None:
+            return False
+        h, w = self.segments.shape
+        x0 = max(0, x_int - max_dist)
+        x1 = min(w, x_int + max_dist + 1)
+        y0 = max(0, y_int - max_dist)
+        y1 = min(h, y_int + max_dist + 1)
+        try:
+            sub = self.segments[y0:y1, x0:x1]
+            return bool((sub == seg_id).any())
+        except Exception:
+            return False
+
     def _on_click(self, event):
         """Handle click events for boundary dragging, manual splitting, or segment labeling."""
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -2564,7 +2690,7 @@ class LabelingTool:
                                 if seg_len >= 0.99 and seg.get('label') == 'no_access' and self.access_click_start is None:
                                     # Start provisional access click here instead of toggling the whole boundary
                                     self.access_click_start = {'frac': frac, 'pt': (int(round(proj[0])), int(round(proj[1])))}
-                                    self.manual_status.config(text="First point set. Click second point to complete access segment.")
+                                    self.set_manual_status("First point set. Click second point to complete access segment.")
                                     self._draw_access_segments()
                                     return
                                 # Otherwise toggle the clicked segment's label
@@ -2592,18 +2718,92 @@ class LabelingTool:
             y_int = int(np.clip(event.ydata, 0, h - 1))
             clicked_seg = self.segments[y_int, x_int] if (0 <= y_int < h and 0 <= x_int < w) else 0
 
+            # If a split target is already selected, interpret left-clicks as drawing points
+            if getattr(self, 'splitting_segment_id', None) is not None:
+                if event.button == 1:
+                    # Decide whether this click is intended to add a split point for
+                    # the currently selected segment (click near/inside it), or to
+                    # select another segment (click far away). Use a small radius.
+                    near = self._is_point_near_segment(x_int, y_int, int(self.splitting_segment_id), max_dist=10)
+                    clicked_seg = self.segments[y_int, x_int] if (0 <= y_int < h and 0 <= x_int < w) else 0
+                    if near or clicked_seg == int(self.splitting_segment_id):
+                        # Append point to current manual line
+                        pt = (int(x_int), int(y_int))
+                        self.manual_line_points.append(pt)
+                        try:
+                            self.set_finalize_enabled(True)
+                        except Exception:
+                            pass
+                        try:
+                            num_pts = len(self.manual_line_points)
+                            self.set_manual_status(f"Drawing line ({num_pts} points) - press Space to finish line or Enter to apply")
+                        except Exception:
+                            pass
+                        try:
+                            self._update_display_with_highlight(self.splitting_segment_id)
+                        except Exception:
+                            pass
+                        return
+                    else:
+                        # Click appears intended to select another segment (or background)
+                        # Clear any existing manual line and change selection accordingly
+                        self._clear_manual_line()
+                        if clicked_seg > 0:
+                            # Select the newly clicked segment
+                            self.splitting_segment_id = int(clicked_seg)
+                            try:
+                                self.set_finalize_enabled(True)
+                            except Exception:
+                                pass
+                            try:
+                                self.set_manual_status(f"Segment {self.splitting_segment_id} selected - draw line to split")
+                            except Exception:
+                                pass
+                            try:
+                                self._update_display_with_highlight(self.splitting_segment_id)
+                            except Exception:
+                                pass
+                        else:
+                            # Clicked outside any segment: deselect
+                            was_selected = self.splitting_segment_id is not None
+                            self.splitting_segment_id = None
+                            try:
+                                self.set_manual_status("Segment deselected - click a segment to select it")
+                            except Exception:
+                                pass
+                            self._update_display()
+                        return
+                elif event.button == 3:
+                    # Right-click cancels selection and current line
+                    was_selected = self.splitting_segment_id is not None
+                    self._clear_manual_line()
+                    if was_selected:
+                        try:
+                            self.set_manual_status("Segment deselected - click a segment to select it")
+                        except Exception:
+                            pass
+                    self._update_display()
+                    return
+
+            # No active split target: treat click as selection/deselection
             if clicked_seg > 0:
                 # If a different segment was selected, clear existing manual lines
                 if self.splitting_segment_id is not None and clicked_seg != self.splitting_segment_id:
                     self._clear_manual_line()
-                # Select this segment for splitting
+                # Select this segment for splitting and start a new manual line with the click as the first point
                 self.splitting_segment_id = int(clicked_seg)
+                # Initialize manual_line_points with the clicked pixel as the first point
                 try:
-                    self.finalize_btn.config(state=tk.NORMAL)
+                    pt = (int(x_int), int(y_int))
+                    self.manual_line_points = [pt]
+                except Exception:
+                    self.manual_line_points = []
+                try:
+                    self.set_finalize_enabled(True)
                 except Exception:
                     pass
                 try:
-                    self.manual_status.config(text=f"Segment {self.splitting_segment_id} selected - draw line to split")
+                    self.set_manual_status(f"Segment {self.splitting_segment_id} selected - drawing line (1 point)")
                 except Exception:
                     pass
                 try:
@@ -2615,7 +2815,7 @@ class LabelingTool:
                 # Clicked outside segments - deselect and provide feedback
                 self.splitting_segment_id = None
                 try:
-                    self.manual_status.config(text="Segment deselected - click a segment to select it")
+                    self.set_manual_status("Segment deselected - click a segment to select it")
                 except Exception:
                     pass
                 self._update_display()
@@ -2809,17 +3009,17 @@ class LabelingTool:
                     self.manual_polylines.append(self.manual_line_points.copy())
                     self.manual_line_points.clear()
                     num_lines = len(self.manual_polylines)
-                    self.manual_status.config(text=f"Line {num_lines} complete. Drawing line {num_lines + 1}...")
+                    self.set_manual_status(f"Line {num_lines} complete. Drawing line {num_lines + 1}...")
                     self._update_display_with_highlight(self.splitting_segment_id)
                 else:
-                    self.manual_status.config(text="Need at least 2 points to finish line!")
+                    self.set_manual_status("Need at least 2 points to finish line!")
             elif event.key == 'escape':
                 was_selected = self.splitting_segment_id is not None
                 self._clear_manual_line()
                 if was_selected:
-                    self.manual_status.config(text="Segment deselected - click a segment to select it")
+                    self.set_manual_status("Segment deselected - click a segment to select it")
                 else:
-                    self.manual_status.config(text="Cancelled")
+                    self.set_manual_status("Cancelled")
                 self._update_display()
             return
 
@@ -3351,15 +3551,6 @@ class LabelingTool:
                 pass
         return output_file
 
-        # Ensure label button's state reflects current mode (disabled in 'segments', enabled otherwise)
-        try:
-            if self.mode == 'segments':
-                self.mode_buttons['label'].config(state=tk.DISABLED)
-            else:
-                self.mode_buttons['label'].config(state=tk.NORMAL)
-        except Exception:
-            pass
-
     def run(self):
         """Start the application."""
         self.root.mainloop()
@@ -3560,23 +3751,32 @@ class LabelingTool:
             if content is not None:
                 content.pack(pady=1, fill='x')
                 btn.config(text='▾')
-            self.mode_buttons['segments'].config(bg='#90EE90')
+            try:
+                b = self.mode_buttons.get('segments')
+                if b is not None:
+                    b.config(bg='#90EE90')
+            except Exception:
+                pass
             # Make Label button available if segments exist (allow user to switch to Label mode)
             try:
                 if getattr(self, 'segments', None) is not None:
-                    self.mode_buttons['label'].config(state=tk.NORMAL)
+                    try:
+                        b = self.mode_buttons.get('label')
+                        if b is not None:
+                            b.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
                 else:
-                    self.mode_buttons['label'].config(state=tk.DISABLED)
+                    try:
+                        b = self.mode_buttons.get('label')
+                        if b is not None:
+                            b.config(state=tk.DISABLED)
+                    except Exception:
+                        pass
             except Exception:
                 pass
-            # Also show class selection and ensure submit stays in footer (visible at bottom)
-            content_cls, btn_cls = self.section_frames.get('5. Class (click to label)', (None, None))
-            if content_cls is not None:
-                content_cls.pack(pady=1, fill='x')
-                try:
-                    btn_cls.config(text='▾')
-                except Exception:
-                    pass
+            # NOTE: Class selection is intentionally hidden in 'segments' mode to avoid accidental labeling.
+            # Users should press the 'Label' button to enter Label mode where class selection is visible.
             try:
                 self.submit_frame.pack_forget()
                 self.submit_frame.pack(in_=self.footer_frame, pady=1, fill='x')
@@ -3584,7 +3784,7 @@ class LabelingTool:
                 pass
             self.ax.set_title("SEGMENT MODE: Select a segment to split or press 'Label' to label segments")
             try:
-                self.finalize_btn.config(state=tk.DISABLED)
+                self.set_finalize_enabled(False)
             except Exception:
                 pass
             self.canvas.draw()
@@ -3600,7 +3800,12 @@ class LabelingTool:
                 pass
             # Ensure label button is enabled when entering Label mode
             try:
-                self.mode_buttons['label'].config(state=tk.NORMAL, bg='#90EE90')
+                try:
+                    b = self.mode_buttons.get('label')
+                    if b is not None:
+                        b.config(state=tk.NORMAL, bg='#90EE90')
+                except Exception:
+                    pass
             except Exception:
                 pass
             # Auto-approve boundary and generate segments if a boundary exists but is not yet approved

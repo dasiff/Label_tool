@@ -35,12 +35,24 @@ def apply_manual_split(self):
     """
     # The implementation intentionally uses `self` attributes directly to avoid
     # complex argument lists; this mirrors the original method's behavior.
+    try:
+        print(f"DEBUG manual_split.apply_manual_split called - splitting_segment_id={getattr(self,'splitting_segment_id',None)}, n_polylines={len(getattr(self,'manual_polylines',[]))}, segments_present={self.segments is not None}")
+    except Exception:
+        pass
     if len(self.manual_polylines) == 0 or self.segments is None:
+        try:
+            print("DEBUG manual_split.apply_manual_split: early return - no polylines or segments missing")
+        except Exception:
+            pass
         return
     
     # Check if user selected a segment to split
     if not hasattr(self, 'splitting_segment_id') or self.splitting_segment_id is None:
-        self.manual_status.config(text="No segment selected! Click a segment first")
+        self.set_manual_status("No segment selected! Click a segment first")
+        try:
+            print("DEBUG manual_split.apply_manual_split: No segment selected - aborting")
+        except Exception:
+            pass
         return
     
     # NOTE: defer saving to split_history until we are about to mutate segments
@@ -93,7 +105,7 @@ def apply_manual_split(self):
 
     if len(edge_coords) == 0:
         print(f"  → No edges found - segment too small")
-        self.manual_status.config(text="Segment too small to split!")
+        self.set_manual_status("Segment too small to split!")
         return
     
     # Create combined line mask from all polylines
@@ -287,7 +299,7 @@ def apply_manual_split(self):
             except Exception:
                 pass
             try:
-                self.manual_status.config(text="Split applied! Draw another or toggle off")
+                self.set_manual_status("Split applied! Draw another or toggle off")
             except Exception:
                 pass
             try:
@@ -305,11 +317,11 @@ def apply_manual_split(self):
         except Exception:
             self.n_segments = int(self.segments.max()) if self.segments is not None else 0
         try:
-            self.manual_status.config(text="Split applied! Draw another or toggle off")
+            self.set_manual_status("Split applied! Draw another or toggle off")
         except Exception:
             pass
         try:
-            self.finalize_btn.config(state='normal')
+            self.set_finalize_enabled(True)
         except Exception:
             pass
         # Keep newly created segment selected
@@ -842,7 +854,7 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
         except Exception:
             self.n_segments = int(self.segments.max()) if self.segments is not None else 0
         try:
-            self.manual_status.config(text="Split applied! Draw another or toggle off")
+            self.set_manual_status("Split applied! Draw another or toggle off")
         except Exception:
             pass
         try:
@@ -876,7 +888,7 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
                         if len(self.split_history) > 10:
                             self.split_history.pop(0)
                         try:
-                            self.undo_split_btn.config(state='normal')
+                            self.set_undo_enabled(True)
                         except Exception:
                             pass
                     except Exception:
@@ -910,11 +922,11 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
             except Exception:
                 self.n_segments = int(self.segments.max()) if self.segments is not None else 0
             try:
-                self.manual_status.config(text="Split applied! Draw another or toggle off")
+                self.set_manual_status("Split applied! Draw another or toggle off")
             except Exception:
                 pass
             try:
-                self.finalize_btn.config(state='normal')
+                self.set_finalize_enabled(True)
             except Exception:
                 pass
             try:
@@ -940,9 +952,9 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
 
     # If combined cuts didn't yet produce multiple components, return and keep polylines
     try:
-        self.manual_status.config(text="No split yet - add more cuts or adjust lines")
+        self.set_manual_status("No split yet - add more cuts or adjust lines")
         try:
-            self.finalize_btn.config(state='normal')
+            self.set_finalize_enabled(True)
         except Exception:
             pass
     except Exception:
@@ -952,7 +964,7 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
         if not all_open_polylines_snapped:
             # do not attempt any fallback - inform user that endpoints were not snapped
             try:
-                self.manual_status.config(text="Split failed: endpoints not snapped to edges/lines; adjust and try again")
+                self.set_manual_status("Split failed: endpoints not snapped to edges/lines; adjust and try again")
             except Exception:
                 pass
             segments_added = 0
@@ -975,7 +987,7 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
                 except Exception:
                     pass
                 try:
-                    self.manual_status.config(text=f"Segment {self.splitting_segment_id} selected - draw another line to split further")
+                    self.set_manual_status(f"Segment {self.splitting_segment_id} selected - draw another line to split further")
                 except Exception:
                     pass
                 try:
@@ -995,7 +1007,7 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
                 segments_added = 0
                 self.splitting_segment_id = None
                 try:
-                    self.manual_status.config(text="Split failed: one side too small; redraw closer to midline")
+                    self.set_manual_status("Split failed: one side too small; redraw closer to midline")
                 except Exception:
                     pass
 

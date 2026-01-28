@@ -29,12 +29,21 @@ def apply_manual_split_background_safe(self):
     self._running_in_background = True
     try:
         manual_polylines = [p.copy() for p in getattr(self, 'manual_polylines', [])]
+        seg_id = getattr(self, 'splitting_segment_id', None)
+        try:
+            print(f"DEBUG workers.apply_manual_split_background_safe: called splitting_segment_id={seg_id}, n_polylines={len(manual_polylines)}")
+        except Exception:
+            pass
         if len(manual_polylines) == 0 or self.segments is None:
             try:
-                self.root.after(0, lambda: self.manual_status.config(text="No lines to apply"))
+                self.set_manual_status("No lines to apply")
             except Exception:
                 pass
             self._running_in_background = False
+            try:
+                print("DEBUG workers.apply_manual_split_background_safe: nothing to do (no polylines or segments missing)")
+            except Exception:
+                pass
             return
 
         segs_local = self.segments.copy()
@@ -44,7 +53,7 @@ def apply_manual_split_background_safe(self):
         h, w = segs_local.shape
         if seg_area == 0:
             try:
-                self.root.after(0, lambda: self.manual_status.config(text="Selected segment empty"))
+                self.set_manual_status("Selected segment empty")
             except Exception:
                 pass
             self._running_in_background = False
@@ -85,6 +94,10 @@ def apply_manual_split_background_safe(self):
             if not is_closed_loop:
                 # Not a closed polygon; fallback to main-thread full split
                 try:
+                    print("DEBUG workers: non-closed polygon fallback - scheduling main-thread full split")
+                except Exception:
+                    pass
+                try:
                     self.root.after(0, lambda: self._apply_manual_split())
                 except Exception:
                     pass
@@ -115,13 +128,9 @@ def apply_manual_split_background_safe(self):
                     old_n = self.n_segments
                     self.n_segments = int(self.segments.max())
                     print(f"\nSegment count: {old_n} -> {self.n_segments} (added {segments_added_local})")
-                    self.manual_status.config(text="Split applied! Draw another or toggle off")
+                    self.set_manual_status("Split applied! Draw another or toggle off")
                     try:
-                        self.finalize_btn.config(state=tk.NORMAL)
-                        try:
-                            self.finalize_btn.config(state=tk.NORMAL)
-                        except Exception:
-                            pass
+                        self.set_finalize_enabled(True)
                     except Exception:
                         pass
                     if new_segment_selected is not None:
@@ -145,9 +154,13 @@ def apply_manual_split_background_safe(self):
         else:
             # Nothing created; report to user
             try:
-                self.root.after(0, lambda: self.manual_status.config(text="Split did not create any region"))
+                self.set_manual_status("Split did not create any region")
             except Exception:
                 pass
     finally:
         self._running_in_background = False
+        try:
+            print("DEBUG workers.apply_manual_split_background_safe: finished")
+        except Exception:
+            pass
 
