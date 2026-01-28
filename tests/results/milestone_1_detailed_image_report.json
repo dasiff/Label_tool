@@ -1,0 +1,28 @@
+[
+  {
+    "index": 1,
+    "filename": "Abby_Guest_House_Goodwin_Ave_Dallas_TX_75206_United_States.png",
+    "image_size": "640x1280",
+    "zipcode": "75206",
+    "red_pixels": 12136,
+    "red_density_percent": 1.48,
+    "boundary_detected": true,
+    "boundary_confidence": 0.756,
+    "boundary_valid": true,
+    "vertices": 4,
+    "area_sq_px": 207385.0
+  },
+  {
+    "index": 2,
+    "filename": "Andaz_8221_N_Central_Expy_Dallas_TX_75225_United_States.png",
+    "image_size": "1920x1920",
+    "zipcode": "75225",
+    "red_pixels": 34723,
+    "red_density_percent": 0.94,
+    "boundary_detected": true,
+    "boundary_confidence": 0.974,
+    "boundary_valid": true,
+    "vertices": 4,
+    "area_sq_px": 2199267.0
+  }
+]

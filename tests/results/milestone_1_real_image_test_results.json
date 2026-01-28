@@ -1,0 +1,34 @@
+{
+  "timestamp": "2026-01-13T10:35:20.270800",
+  "dataset": {
+    "total_images": 2,
+    "images_with_red": 2,
+    "detected_boundaries": 2,
+    "valid_boundaries": 2
+  },
+  "statistics": {
+    "avg_confidence": 0.8649122450086806,
+    "avg_red_density": 1.2116834852430556,
+    "boundary_areas": {
+      "min": 207385.0,
+      "max": 2199267.0,
+      "mean": 1203326.0,
+      "median": 1203326.0
+    },
+    "boundary_vertices": {
+      "min": 4,
+      "max": 4,
+      "mean": 4.0
+    }
+  },
+  "locations": {
+    "75206": {
+      "latitude": 32.8,
+      "image_count": 1
+    },
+    "75225": {
+      "latitude": 32.8,
+      "image_count": 1
+    }
+  }
+}
