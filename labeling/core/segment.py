@@ -317,7 +317,8 @@ def _generate_segments(self):
 
     # --- New: prune, simplify, and optionally convexify components for cleaner shapes ---
     try:
-        self._prune_and_simplify_segments(level=self.segment_smoothing_level)
+        # call module-level helper to prune & simplify
+        _prune_and_simplify_segments(self, level=self.segment_smoothing_level)
     except Exception as e:
         print('Warning: _prune_and_simplify_segments failed', e)
 
