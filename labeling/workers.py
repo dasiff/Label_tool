@@ -80,8 +80,29 @@ def apply_manual_split_background_safe(self):
         # quick path: handle closed polygons only
         for manual_line_points in manual_polylines:
             pts = np.array(manual_line_points, dtype=np.int32)
+            # If the drawn polyline has fewer than 3 points (typical 2-point split),
+            # we cannot safely process it in the background worker. Schedule a main-thread
+            # full split and return so the synchronous path handles open-line cases.
             if pts.shape[0] < 3:
-                continue
+                try:
+                    print("DEBUG workers: open polyline (<3 pts) - scheduling main-thread full split")
+                except Exception:
+                    pass
+                try:
+                    self._background_scheduled_full_split = True
+                    self._background_scheduled_info = {'seg_id': seg_id, 'n_polylines': len(manual_polylines), 'note': 'open_polyline'}
+                except Exception:
+                    pass
+                try:
+                    self.root.after(0, lambda: self._apply_manual_split())
+                except Exception:
+                    pass
+                self._running_in_background = False
+                try:
+                    print(f"DEBUG workers: scheduled fallback for open polyline (seg={seg_id})")
+                except Exception:
+                    pass
+                return
             p0 = pts[0]; p_last = pts[-1]
             dist_endpoints = np.linalg.norm(np.array([p0[1], p0[0]]) - np.array([p_last[1], p_last[0]]))
             if edge_coords.size == 0:
@@ -98,10 +119,20 @@ def apply_manual_split_background_safe(self):
                 except Exception:
                     pass
                 try:
+                    # Mark that worker scheduled a main-thread fallback so UI can detect this
+                    try:
+                        self._background_scheduled_full_split = True
+                        self._background_scheduled_info = {'seg_id': seg_id, 'n_polylines': len(manual_polylines)}
+                    except Exception:
+                        pass
                     self.root.after(0, lambda: self._apply_manual_split())
                 except Exception:
                     pass
                 self._running_in_background = False
+                try:
+                    print(f"DEBUG workers: scheduled fallback (seg={seg_id}, n_polylines={len(manual_polylines)})")
+                except Exception:
+                    pass
                 return
 
             # closed polygon: fill and assign if large enough

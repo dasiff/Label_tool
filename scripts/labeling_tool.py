@@ -1731,6 +1731,20 @@ class LabelingTool:
         """
         # Call the pure-core implementation; then ensure selection preserved when split occurred
         old_n = int(self.n_segments) if getattr(self, 'n_segments', None) is not None else (int(self.segments.max()) if self.segments is not None else 0)
+        # Report if this call was scheduled from worker fallback
+        if getattr(self, '_background_scheduled_full_split', False):
+            try:
+                info = getattr(self, '_background_scheduled_info', {})
+                print(f"DEBUG: _apply_manual_split called via worker fallback: {info}")
+            except Exception:
+                pass
+            # Clear scheduling flag here so future operations aren't affected
+            try:
+                self._background_scheduled_full_split = False
+                self._background_scheduled_info = None
+            except Exception:
+                pass
+
         manual_split_core.apply_manual_split(self)
         try:
             new_n = int(self.segments.max()) if self.segments is not None else old_n
@@ -1741,6 +1755,33 @@ class LabelingTool:
                     self._update_display_with_highlight(self.splitting_segment_id)
                 except Exception:
                     pass
+        except Exception:
+            pass
+
+        # If nothing changed, give a concise diagnostic using last split info
+        try:
+            if new_n == old_n:
+                info = getattr(self, '_last_split_info', None)
+                snap = getattr(self, '_last_snap_info', None)
+                msg_parts = []
+                if info is not None:
+                    try:
+                        reason = info.get('reason') if isinstance(info, dict) else str(info)
+                        msg_parts.append(f"reason={reason}")
+                    except Exception:
+                        pass
+                if snap is not None:
+                    try:
+                        s = snap.get('start', {}).get('source')
+                        e = snap.get('end', {}).get('source')
+                        msg_parts.append(f"snap(start={s},end={e})")
+                    except Exception:
+                        pass
+                if msg_parts:
+                    try:
+                        self.set_manual_status("Split did not create any region: " + "; ".join(msg_parts))
+                    except Exception:
+                        pass
         except Exception:
             pass
         return

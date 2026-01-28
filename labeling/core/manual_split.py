@@ -836,6 +836,17 @@ def _apply_split_state(self, state, seg_mask, line_mask, full_line_mask, seg_id,
             print(f"  DEBUG: split not applied, info={info}")
         except Exception:
             pass
+        try:
+            # Expose info to caller/UI for diagnostics and show concise message
+            self._last_split_info = info
+            reason = info.get('reason', 'no_split') if isinstance(info, dict) else str(info)
+            try:
+                self.set_manual_status(f"Split did not create any region (reason: {reason})")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
 
     if applied:
         # apply results and handle UI state in caller
