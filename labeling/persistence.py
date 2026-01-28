@@ -163,8 +163,11 @@ def save_draft(self):
 
         # Notify user on main thread
         try:
-            self.root.after(0, lambda: self.manual_status.config(text=f"Draft saved: {json_path.name}"))
-            self.root.after(0, lambda: __import__('tkinter').messagebox.showinfo('Draft saved', f"Draft saved: {json_path}"))
+            self.set_manual_status(f"Draft saved: {json_path.name}")
+            try:
+                self.root.after(0, lambda: __import__('tkinter').messagebox.showinfo('Draft saved', f"Draft saved: {json_path}"))
+            except Exception:
+                pass
         except Exception:
             pass
         try:

@@ -252,7 +252,7 @@ class LabelingTool:
                     self._v = v
 
             self.buffer_mode_var = _StubVar('px')
-            self.segment_smoothing_var = _StubVar('med')
+            self.segment_smoothing_var = _StubVar('high')
             # Default to shadow-robust segmentation in headless/test envs as well
             self.shadow_robust_var = _StubVar(True)
             self.pre_smooth_var = _StubVar(False)
@@ -457,7 +457,7 @@ class LabelingTool:
         smoothing_frame = tk.Frame(seg_content, bg='#f0f0f0')
         smoothing_frame.pack(pady=2)
         tk.Label(smoothing_frame, text="Smoothing:", bg='#f0f0f0').pack(side=tk.LEFT)
-        self.segment_smoothing_var = tk.StringVar(value='med')
+        self.segment_smoothing_var = tk.StringVar(value='high')
         smoothing_options = [('Off','off'), ('Low','low'), ('Med','med'), ('High','high')]
         for text, val in smoothing_options:
             tk.Radiobutton(smoothing_frame, text=text, variable=self.segment_smoothing_var, value=val, bg='#f0f0f0', command=self._on_smoothing_change).pack(side=tk.LEFT, padx=4)
@@ -888,7 +888,7 @@ class LabelingTool:
         self.enhanced_image = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB)
         # Initialize smoothing level (controls polygon simplification)
         if not hasattr(self, 'segment_smoothing_level'):
-            self.segment_smoothing_level = 'med'  # default: med
+            self.segment_smoothing_level = 'high'  # default: high
         
         # Only display clean image initially if we don't have existing labels
         # (if we do have labels, _update_display() will handle the display)
@@ -2792,12 +2792,13 @@ class LabelingTool:
                         if clicked_seg > 0:
                             # Select the newly clicked segment
                             self.splitting_segment_id = int(clicked_seg)
+                            # Do not start drawing yet - wait for an explicit click to add the first point
                             try:
-                                self.set_finalize_enabled(True)
+                                self.set_finalize_enabled(False)
                             except Exception:
                                 pass
                             try:
-                                self.set_manual_status(f"Segment {self.splitting_segment_id} selected - draw line to split")
+                                self.set_manual_status(f"Segment {self.splitting_segment_id} selected - click to start drawing")
                             except Exception:
                                 pass
                             try:
@@ -2831,20 +2832,19 @@ class LabelingTool:
                 # If a different segment was selected, clear existing manual lines
                 if self.splitting_segment_id is not None and clicked_seg != self.splitting_segment_id:
                     self._clear_manual_line()
-                # Select this segment for splitting and start a new manual line with the click as the first point
+                # Select this segment for splitting but DO NOT start the line yet - wait for an explicit click
                 self.splitting_segment_id = int(clicked_seg)
-                # Initialize manual_line_points with the clicked pixel as the first point
+                # Ensure no points are placed on simple selection
                 try:
-                    pt = (int(x_int), int(y_int))
-                    self.manual_line_points = [pt]
+                    self.manual_line_points = []
                 except Exception:
                     self.manual_line_points = []
                 try:
-                    self.set_finalize_enabled(True)
+                    self.set_finalize_enabled(False)
                 except Exception:
                     pass
                 try:
-                    self.set_manual_status(f"Segment {self.splitting_segment_id} selected - drawing line (1 point)")
+                    self.set_manual_status(f"Segment {self.splitting_segment_id} selected - click to start drawing")
                 except Exception:
                     pass
                 try:
@@ -3861,6 +3861,11 @@ class LabelingTool:
                     self._clear_manual_line()
                 except Exception:
                     self.splitting_segment_id = None
+            # Ensure full segments display is shown after leaving split/segments state
+            try:
+                self._update_display()
+            except Exception:
+                pass
             # If boundary is approved but segments haven't been generated (e.g., saved boundary without segments), generate them now
             if self.boundary_approved and self.segments is None:
                 try:

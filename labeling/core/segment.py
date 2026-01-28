@@ -338,7 +338,10 @@ def _generate_segments(self):
     # Display segments
     self._update_display()
     
-    self.seg_status.config(text=f"✓ {self.n_segments} segments (target: {self.target_segments})")
+    try:
+        self.set_seg_status(f"✓ {self.n_segments} segments (target: {self.target_segments})")
+    except Exception:
+        pass
     self._update_progress()
 
 

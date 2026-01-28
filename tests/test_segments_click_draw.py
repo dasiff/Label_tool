@@ -19,16 +19,21 @@ def test_select_segment_and_draw_points():
     # Ensure we're in segments mode
     t._set_mode('segments')
 
-    # Click inside the segment to select it (and start the line)
+    # Click inside the segment to select it (should NOT start the line)
     evt1 = SimpleNamespace(inaxes=t.ax, xdata=20.0, ydata=20.0, button=1)
     t._on_click(evt1)
     assert t.splitting_segment_id == 1, "Clicking a segment should select it for splitting"
-    assert len(t.manual_line_points) == 1 and t.manual_line_points[0] == (20, 20), "Selecting a segment should start the manual line with the clicked point"
+    assert len(t.manual_line_points) == 0, "Selecting a segment should NOT start the manual line"
 
-    # Click again (different point) to add a second point to the manual line
+    # Click to add the first point
     evt2 = SimpleNamespace(inaxes=t.ax, xdata=30.0, ydata=30.0, button=1)
     t._on_click(evt2)
-    assert len(t.manual_line_points) == 2 and t.manual_line_points[-1] == (30, 30), "Second left-click should append a second point to manual_line_points"
+    assert len(t.manual_line_points) == 1 and t.manual_line_points[0] == (30, 30), "First drawing click should append the first point"
+
+    # Click again to add a second point
+    evt3 = SimpleNamespace(inaxes=t.ax, xdata=40.0, ydata=40.0, button=1)
+    t._on_click(evt3)
+    assert len(t.manual_line_points) == 2 and t.manual_line_points[-1] == (40, 40), "Second drawing click should append a second point"
 
 
 def test_click_far_outside_selects_other_segment_and_not_add_point():
@@ -91,8 +96,9 @@ def test_press_enter_after_drawing_finishes_and_splits_segment():
 
     t._set_mode('segments')
 
-    # Select segment and add two points to make a short line that bisects
+    # Select segment and then add two points to make a short line that bisects
     t._on_click(SimpleNamespace(inaxes=t.ax, xdata=30.0, ydata=30.0, button=1))
+    t._on_click(SimpleNamespace(inaxes=t.ax, xdata=35.0, ydata=35.0, button=1))
     t._on_click(SimpleNamespace(inaxes=t.ax, xdata=45.0, ydata=45.0, button=1))
 
     # Press Enter to finalize (run synchronously in tests)
