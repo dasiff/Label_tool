@@ -47,6 +47,7 @@ Testing & small-data advice
 Developer notes
 - Shared augmentation helper: `src/data/augmentations.py::get_common_augmentation()` is used by both notebooks to ensure consistent augmentations.
 - Masks→segments heuristics are implemented in `scripts/masks_to_segments.py` following the labeling tool's approach (morphology, chaikin smoothing, DP simplification, convex hull fallback, and boundary-gradient based merging).
+- Experiment logging: each training run records a metadata entry (run id, name, params, and results) under `experiments/` using `src/utils/experiments.record_experiment()`; the directory contains `experiments.jsonl`, `experiments.csv`, and per-run `<run_id>.json` files.
 
 Next steps
 - Want a convenience script to batch-infer all images and convert masks→polygons in one run? I can add a small CLI helper and a CI test that validates output sanity (area thresholds, number of vertices). Let me know and I will add it.
