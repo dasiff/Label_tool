@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# pytest cache
+.pytest_cache/
+
+# build/dist
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# temporary
+tmp/
+# Ignore raw and large data
+data/
+raw_images/
+models/
+*.npy
+*.npz
+*.db
+# Notebooks and interactive files
+*.ipynb
+Interactive-1.interactive.ipynb
+# Temp and outputs
+tmp*
+tmp_test*/
+tmp_test_outputs/
+# Docs images and export folders
+docs/images/
+.results/
+# Editor and env
+.venv/
+.vscode/
+.DS_Store

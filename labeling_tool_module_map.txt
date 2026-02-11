@@ -1,0 +1,87 @@
+Proposed Module ↔ File Mapping
+
+Notes: This file maps current repository files (or new suggested paths) to the modules proposed in the refactor plan. Use this as a checklist when you later move code, split modules or create a simplified tool.
+
+---
+app/main.py (new)
+- Responsibility: Application bootstrap, CLI/flags, start GUI
+- Inputs: config/CLI args
+- Outputs: running app (invokes controller.run())
+
+app/controller.py (new)
+- Responsibility: Orchestrates state, exposes high-level API consumed by UI and tests
+- Inputs: calls from UI (events), results from core funcs
+- Outputs: updated app state, triggers to UI, persistence requests
+
+app/ui.py (new)
+- Responsibility: Build Tkinter + Matplotlib UI, forward events to controller
+- Inputs: controller callbacks, config
+- Outputs: user events; renders artists/images provided by render module
+
+app/core/boundary.py -> scripts/labeling_tool.py (behavioral ref)
+- Responsibility: Detect red overlay boundary (already in app/core/boundary.py in code)
+- Inputs: BGR numpy array image
+- Outputs: BoundaryResult(polygon_px, confidence, warnings), debug image
+
+app/core/segment.py (new)
+- Responsibility: Feature build → felzenszwalb → upsample → morphological postprocess + merge
+- Inputs: clean_image, boundary polygon, target_segments, flags (fast_preview, shadow_robust, min_size)
+- Outputs: segments ndarray, n_segments, debug metadata
+
+app/core/manual_split.py (new)
+- Responsibility: Apply manual polylines (open/closed), snapping, seed flood fallback, undo stack
+- Inputs: segments ndarray, manual polylines, selected segment id, image mask
+- Outputs: updated segments ndarray, new ids, selected segment id
+
+app/render.py -> scripts/render.py
+- Responsibility: Create overlayed annotated images and Matplotlib artists
+- Inputs: clean_image, segments, labels, boundary polygon, render options
+- Outputs: annotated image (BGR/PNG/base64), Matplotlib artists for UI
+
+app/io/persistence.py (new)
+- Responsibility: Atomic write/read for drafts and submission artifacts
+- Inputs: segments, labels, metadata, target paths
+- Outputs: files on disk, success/error status
+
+app/utils/image_io.py -> scripts/utils.py
+- Responsibility: decode/encode images (PIL↔numpy), base64 encode/decode
+- Inputs: bytes, filepaths, numpy arrays
+- Outputs: arrays/bytes/strings
+
+app/workers.py (new)
+- Responsibility: Thread/worker helpers and safe callback scheduling onto main loop
+- Inputs: callables, callback, executor settings
+- Outputs: asynchronous results via callback + error reporting
+
+app/config.py (new)
+- Responsibility: Centralized constants (CLASSES, COLORS), default params
+- Inputs: optional overrides via env/config
+- Outputs: config object used across modules
+
+scripts/labeling_tool.py (FROZEN - reference behavior)
+- Responsibility: Monolithic UI + controller; frozen as reference. Do not edit.
+- Inputs: user actions, images
+- Outputs: UI render, files, debug images
+
+scripts/labeling_tool_simple.py (new target)
+- Responsibility: Minimal UI that uses controller APIs only (simpler subset)
+- Inputs: controller API
+- Outputs: user-facing simplified tool; final outputs via persistence
+
+scripts/image_manager.py -> app/io or scripts/image_manager.py
+- Responsibility: store/retrieve images + metadata
+- Inputs: image bytes, metadata
+- Outputs: saved image files, metadata JSON
+
+tests/ (existing)
+- Responsibility: Exercise headless controller & core modules; CI
+- Inputs: test fixtures, synthetic images
+- Outputs: pass/fail assertions
+
+---
+Guidance for next step (do later):
+- Create `app/controller.py` and move non-UI logic into it, leaving `scripts/labeling_tool.py` as read-only reference.
+- Build `app/core/*` modules around pure functions/classes and add unit tests targeting them in headless mode.
+- Create `scripts/labeling_tool_simple.py` that imports `app/controller` and `app/ui` (or a tiny wrapper) to present a minimal UI.
+
+If you'd like, I can also produce a smaller checklist for splitting `scripts/labeling_tool.py` into these modules step-by-step.
